@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>syscon - Container Auditor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; }
+  #sidebar { width: 280px; background: #16213e; border-right: 1px solid #0f3460; overflow-y: auto; flex-shrink: 0; }
+  #sidebar h2 { padding: 16px; font-size: 14px; color: #e94560; border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center; }
+  .container-item { padding: 10px 16px; border-bottom: 1px solid #0f3460; cursor: pointer; font-size: 12px; }
+  .container-item:hover { background: #0f3460; }
+  .container-item.active { background: #0f3460; border-left: 3px solid #e94560; }
+  .container-item .cid { color: #e94560; font-weight: bold; }
+  .container-item .stats { color: #888; font-size: 11px; margin-top: 2px; }
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #tabs { display: flex; background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
+  .tab { padding: 10px 16px; cursor: pointer; font-size: 12px; color: #888; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tab:hover { color: #e0e0e0; }
+  .tab.active { color: #e94560; border-bottom-color: #e94560; }
+  .tab-sep { border-left: 1px solid #0f3460; margin: 4px 0; }
+  #content { flex: 1; overflow: hidden; padding: 0; position: relative; }
+  #receipt-view { white-space: pre-wrap; padding: 16px; font-size: 12px; line-height: 1.6; overflow: auto; height: 100%; }
+  #graph-view { width: 100%; height: 100%; background: #f8f8f8; overflow: hidden; cursor: grab; position: relative; }
+  #graph-view.dragging { cursor: grabbing; }
+  #graph-inner { transform-origin: 0 0; position: absolute; }
+  #graph-controls { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 4px; z-index: 10; }
+  #graph-controls button { width: 32px; height: 32px; background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; cursor: pointer; font-size: 16px; font-family: inherit; display: flex; align-items: center; justify-content: center; }
+  #graph-controls button:hover { background: #0f3460; color: #e94560; }
+  #zoom-level { color: #666; font-size: 10px; text-align: center; background: #16213e; padding: 2px; border-radius: 3px; border: 1px solid #0f3460; }
+  .hidden { display: none !important; }
+  #no-selection { display: flex; align-items: center; justify-content: center; height: 100%; color: #555; font-size: 14px; }
+  #status-bar { background: #16213e; border-top: 1px solid #0f3460; padding: 6px 16px; font-size: 11px; color: #666; display: flex; justify-content: space-between; }
+  .btn { background: none; border: 1px solid #0f3460; color: #888; padding: 2px 8px; cursor: pointer; font-family: inherit; font-size: 11px; border-radius: 3px; }
+  .btn:hover { color: #e94560; border-color: #e94560; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2>CONTAINERS <button class="btn" onclick="refreshContainers()">refresh</button></h2>
+  <div id="container-list"></div>
+</div>
+
+<div id="main">
+  <div id="tabs">
+    <div class="tab active" data-tab="receipt" onclick="switchTab('receipt')">Snapshot</div>
+    <div class="tab" data-tab="graph" onclick="switchTab('graph')">Graph</div>
+    <div class="tab-sep"></div>
+    <div id="action-tabs"></div>
+  </div>
+  <div id="content">
+    <div id="no-selection">Select a container from the sidebar</div>
+    <div id="receipt-view" class="hidden"></div>
+    <div id="graph-view" class="hidden">
+      <div id="graph-inner"></div>
+      <div id="graph-controls">
+        <button onclick="graphZoom(1.3)" title="Zoom in">+</button>
+        <button onclick="graphZoom(0.7)" title="Zoom out">-</button>
+        <button onclick="graphFit()" title="Fit to view">F</button>
+        <button onclick="graphReset()" title="Reset zoom">1</button>
+        <div id="zoom-level">100%</div>
+      </div>
+    </div>
+  </div>
+  <div id="status-bar">
+    <span id="status-text">Ready</span>
+    <span><label><input type="checkbox" id="auto-refresh-toggle"> Auto-refresh (5s)</label></span>
+  </div>
+</div>
+
+<script>
+let selectedContainer = null;
+let currentTab = 'receipt';
+let autoRefreshTimer = null;
+
+// Graph pan/zoom state
+let gZoom = 1;
+let gPanX = 0;
+let gPanY = 0;
+let gDragging = false;
+let gDragStartX = 0;
+let gDragStartY = 0;
+let gPanStartX = 0;
+let gPanStartY = 0;
+
+function graphUpdateTransform() {
+  const inner = document.getElementById('graph-inner');
+  if (inner) {
+    inner.style.transform = `translate(${gPanX}px, ${gPanY}px) scale(${gZoom})`;
+  }
+  const zl = document.getElementById('zoom-level');
+  if (zl) zl.textContent = Math.round(gZoom * 100) + '%';
+}
+
+function graphZoom(factor) {
+  const view = document.getElementById('graph-view');
+  const cx = view.clientWidth / 2;
+  const cy = view.clientHeight / 2;
+  // Zoom towards center
+  gPanX = cx - factor * (cx - gPanX);
+  gPanY = cy - factor * (cy - gPanY);
+  gZoom *= factor;
+  gZoom = Math.max(0.05, Math.min(10, gZoom));
+  graphUpdateTransform();
+}
+
+function graphFit() {
+  const view = document.getElementById('graph-view');
+  const inner = document.getElementById('graph-inner');
+  const svg = inner ? inner.querySelector('svg') : null;
+  if (!svg) return;
+  const svgW = parseFloat(svg.getAttribute('width') || svg.viewBox?.baseVal?.width || svg.getBBox().width);
+  const svgH = parseFloat(svg.getAttribute('height') || svg.viewBox?.baseVal?.height || svg.getBBox().height);
+  if (!svgW || !svgH) return;
+  const scaleX = view.clientWidth / svgW;
+  const scaleY = view.clientHeight / svgH;
+  gZoom = Math.min(scaleX, scaleY) * 0.95;
+  gPanX = (view.clientWidth - svgW * gZoom) / 2;
+  gPanY = (view.clientHeight - svgH * gZoom) / 2;
+  graphUpdateTransform();
+}
+
+function graphReset() {
+  gZoom = 1; gPanX = 0; gPanY = 0;
+  graphUpdateTransform();
+}
+
+// Mouse events for pan/zoom
+document.addEventListener('DOMContentLoaded', () => {
+  const view = document.getElementById('graph-view');
+
+  view.addEventListener('wheel', (e) => {
+    if (currentTab !== 'graph') return; // Don't capture scroll when showing receipt
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 0.91;
+    // Zoom towards cursor position
+    const rect = view.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    gPanX = mx - factor * (mx - gPanX);
+    gPanY = my - factor * (my - gPanY);
+    gZoom *= factor;
+    gZoom = Math.max(0.05, Math.min(10, gZoom));
+    graphUpdateTransform();
+  }, { passive: false });
+
+  view.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || currentTab !== 'graph') return;
+    gDragging = true;
+    gDragStartX = e.clientX;
+    gDragStartY = e.clientY;
+    gPanStartX = gPanX;
+    gPanStartY = gPanY;
+    view.classList.add('dragging');
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!gDragging) return;
+    gPanX = gPanStartX + (e.clientX - gDragStartX);
+    gPanY = gPanStartY + (e.clientY - gDragStartY);
+    graphUpdateTransform();
+  });
+
+  document.addEventListener('mouseup', () => {
+    gDragging = false;
+    view.classList.remove('dragging');
+  });
+});
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function refreshContainers() {
+  try {
+    const containers = await fetchJSON('/containers');
+    const list = document.getElementById('container-list');
+    list.innerHTML = '';
+    containers.sort((a, b) => b.processes - a.processes);
+    for (const c of containers) {
+      const div = document.createElement('div');
+      div.className = 'container-item' + (selectedContainer === c.container_id ? ' active' : '');
+      div.innerHTML = `
+        <div class="cid">${c.container_id}</div>
+        <div class="stats">${c.processes} procs, ${c.influence_edges} edges, ${c.completed_actions} actions</div>
+      `;
+      div.onclick = () => selectContainer(c.container_id);
+      list.appendChild(div);
+    }
+    document.getElementById('status-text').textContent =
+      `${containers.length} containers | ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    document.getElementById('status-text').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function selectContainer(id) {
+  selectedContainer = id;
+  document.querySelectorAll('.container-item').forEach(el => {
+    el.classList.toggle('active', el.querySelector('.cid').textContent === id);
+  });
+  document.getElementById('no-selection').classList.add('hidden');
+  await loadActionTabs();
+  await loadTab();
+}
+
+async function loadActionTabs() {
+  if (!selectedContainer) return;
+  const actionTabsDiv = document.getElementById('action-tabs');
+  try {
+    const data = await fetchJSON(`/containers/${selectedContainer}/actions`);
+    let html = '';
+    for (const a of (data.completed || [])) {
+      const short = a.command.length > 20 ? a.command.slice(0,20)+'...' : a.command;
+      html += `<div class="tab" data-tab="action-${a.action_id}" onclick="switchTab('action-${a.action_id}')">A${a.action_id}: ${short}</div>`;
+    }
+    actionTabsDiv.innerHTML = html;
+  } catch (e) {
+    actionTabsDiv.innerHTML = '';
+  }
+}
+
+async function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+  // Hide action tabs when viewing the graph
+  const actionTabs = document.getElementById('action-tabs');
+  const tabSep = document.querySelector('.tab-sep');
+  if (tab === 'graph') {
+    actionTabs.classList.add('hidden');
+    if (tabSep) tabSep.classList.add('hidden');
+  } else {
+    actionTabs.classList.remove('hidden');
+    if (tabSep) tabSep.classList.remove('hidden');
+  }
+  await loadTab();
+}
+
+async function loadTab() {
+  if (!selectedContainer) return;
+  const receiptView = document.getElementById('receipt-view');
+  const graphView = document.getElementById('graph-view');
+
+  if (currentTab === 'graph') {
+    graphView.classList.remove('hidden');
+    receiptView.classList.add('hidden');
+    try {
+      const r = await fetch(`/containers/${selectedContainer}/graph`);
+      const dot = await r.text();
+      // Render DOT to SVG client-side using viz.js
+      if (typeof Viz === 'undefined') {
+        document.getElementById('graph-inner').innerHTML = '<div style="color:#888;padding:20px">Loading renderer...</div>';
+        // viz.js not loaded yet — this shouldn't happen after init
+      } else {
+        const svg = await Viz.instance().then(viz => viz.renderSVGElement(dot));
+        const inner = document.getElementById('graph-inner');
+        inner.innerHTML = '';
+        inner.appendChild(svg);
+        svg.style.width = 'auto';
+        svg.style.height = 'auto';
+      }
+      setTimeout(graphFit, 50);
+    } catch (e) {
+      document.getElementById('graph-inner').innerHTML = '<div style="color:#c00;padding:20px">Error: ' + e.message + '</div>';
+    }
+  } else if (currentTab === 'receipt') {
+    receiptView.classList.remove('hidden');
+    graphView.classList.add('hidden');
+    try {
+      const data = await fetchJSON(`/containers/${selectedContainer}/receipt`);
+      receiptView.textContent = data.receipt || data.error || 'No data';
+    } catch (e) {
+      receiptView.textContent = 'Error: ' + e.message;
+    }
+  } else if (currentTab.startsWith('action-')) {
+    receiptView.classList.remove('hidden');
+    graphView.classList.add('hidden');
+    const actionId = currentTab.split('-')[1];
+    try {
+      const data = await fetchJSON(`/containers/${selectedContainer}/actions/${actionId}/receipt`);
+      receiptView.textContent = data.receipt || data.error || 'No data';
+    } catch (e) {
+      receiptView.textContent = 'Error: ' + e.message;
+    }
+  }
+}
+
+function startAutoRefresh() {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(async () => {
+    if (!document.getElementById('auto-refresh-toggle').checked) return;
+    await refreshContainers();
+    if (selectedContainer) {
+      await loadActionTabs();
+      await loadTab();
+    }
+  }, 5000);
+}
+
+refreshContainers();
+startAutoRefresh();
+</script>
+<script src="/viz.js"></script>
+</body>
+</html>
