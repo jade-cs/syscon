@@ -14,12 +14,19 @@
   .container-item .cid { color: #e94560; font-weight: bold; }
   .container-item .stats { color: #888; font-size: 11px; margin-top: 2px; }
   #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  #tabs { display: flex; background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
+  #tabs { display: flex; background: #16213e; border-bottom: 1px solid #0f3460; }
   .tab { padding: 10px 16px; cursor: pointer; font-size: 12px; color: #888; border-bottom: 2px solid transparent; white-space: nowrap; }
   .tab:hover { color: #e0e0e0; }
   .tab.active { color: #e94560; border-bottom-color: #e94560; }
-  .tab-sep { border-left: 1px solid #0f3460; margin: 4px 0; }
-  #content { flex: 1; overflow: hidden; padding: 0; position: relative; }
+  #content-wrapper { flex: 1; display: flex; overflow: hidden; }
+  #action-sidebar { width: 220px; background: #16213e; border-right: 1px solid #0f3460; overflow-y: auto; flex-shrink: 0; }
+  #action-sidebar h3 { padding: 10px 12px; font-size: 11px; color: #888; border-bottom: 1px solid #0f3460; text-transform: uppercase; letter-spacing: 0.5px; }
+  .action-item { padding: 8px 12px; border-bottom: 1px solid #0f3460; cursor: pointer; font-size: 11px; color: #aaa; }
+  .action-item:hover { background: #0f3460; color: #e0e0e0; }
+  .action-item.active { background: #0f3460; color: #e94560; border-left: 3px solid #e94560; }
+  .action-item .action-id { color: #e94560; font-weight: bold; }
+  .action-item .action-cmd { color: #aaa; margin-top: 2px; word-break: break-all; }
+  #content { flex: 1; overflow: hidden; position: relative; }
   #receipt-view { white-space: pre-wrap; padding: 16px; font-size: 12px; line-height: 1.6; overflow: auto; height: 100%; }
   #graph-view { width: 100%; height: 100%; background: #f8f8f8; overflow: hidden; cursor: grab; position: relative; }
   #graph-view.dragging { cursor: grabbing; }
@@ -30,9 +37,14 @@
   #zoom-level { color: #666; font-size: 10px; text-align: center; background: #16213e; padding: 2px; border-radius: 3px; border: 1px solid #0f3460; }
   .hidden { display: none !important; }
   #no-selection { display: flex; align-items: center; justify-content: center; height: 100%; color: #555; font-size: 14px; }
+  #graph-loading { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #f8f8f8; z-index: 20; }
+  #graph-loading .spinner { width: 32px; height: 32px; border: 3px solid #ddd; border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  #graph-loading .label { margin-top: 12px; color: #666; font-size: 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   #status-bar { background: #16213e; border-top: 1px solid #0f3460; padding: 6px 16px; font-size: 11px; color: #666; display: flex; justify-content: space-between; }
   .btn { background: none; border: 1px solid #0f3460; color: #888; padding: 2px 8px; cursor: pointer; font-family: inherit; font-size: 11px; border-radius: 3px; }
   .btn:hover { color: #e94560; border-color: #e94560; }
+  .skipped-note { padding: 8px 16px; font-size: 11px; color: #555; border-top: 1px solid #0f3460; }
 </style>
 </head>
 <body>
@@ -40,26 +52,35 @@
 <div id="sidebar">
   <h2>CONTAINERS <button class="btn" onclick="refreshContainers()">refresh</button></h2>
   <div id="container-list"></div>
+  <div id="skipped-note" class="skipped-note hidden"></div>
 </div>
 
 <div id="main">
   <div id="tabs">
     <div class="tab active" data-tab="receipt" onclick="switchTab('receipt')">Snapshot</div>
     <div class="tab" data-tab="graph" onclick="switchTab('graph')">Graph</div>
-    <div class="tab-sep"></div>
-    <div id="action-tabs"></div>
   </div>
-  <div id="content">
-    <div id="no-selection">Select a container from the sidebar</div>
-    <div id="receipt-view" class="hidden"></div>
-    <div id="graph-view" class="hidden">
-      <div id="graph-inner"></div>
-      <div id="graph-controls">
-        <button onclick="graphZoom(1.3)" title="Zoom in">+</button>
-        <button onclick="graphZoom(0.7)" title="Zoom out">-</button>
-        <button onclick="graphFit()" title="Fit to view">F</button>
-        <button onclick="graphReset()" title="Reset zoom">1</button>
-        <div id="zoom-level">100%</div>
+  <div id="content-wrapper">
+    <div id="action-sidebar" class="hidden">
+      <h3>Actions</h3>
+      <div id="action-list"></div>
+    </div>
+    <div id="content">
+      <div id="no-selection">Select a container from the sidebar</div>
+      <div id="receipt-view" class="hidden"></div>
+      <div id="graph-view" class="hidden">
+        <div id="graph-loading" class="hidden">
+          <div class="spinner"></div>
+          <div class="label">Rendering graph...</div>
+        </div>
+        <div id="graph-inner"></div>
+        <div id="graph-controls">
+          <button onclick="graphZoom(1.3)" title="Zoom in">+</button>
+          <button onclick="graphZoom(0.7)" title="Zoom out">-</button>
+          <button onclick="graphFit()" title="Fit to view">F</button>
+          <button onclick="graphReset()" title="Reset zoom">1</button>
+          <div id="zoom-level">100%</div>
+        </div>
       </div>
     </div>
   </div>
@@ -72,6 +93,7 @@
 <script>
 let selectedContainer = null;
 let currentTab = 'receipt';
+let selectedAction = null; // null = snapshot
 let autoRefreshTimer = null;
 
 // Graph pan/zoom state
@@ -97,7 +119,6 @@ function graphZoom(factor) {
   const view = document.getElementById('graph-view');
   const cx = view.clientWidth / 2;
   const cy = view.clientHeight / 2;
-  // Zoom towards center
   gPanX = cx - factor * (cx - gPanX);
   gPanY = cy - factor * (cy - gPanY);
   gZoom *= factor;
@@ -131,10 +152,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const view = document.getElementById('graph-view');
 
   view.addEventListener('wheel', (e) => {
-    if (currentTab !== 'graph') return; // Don't capture scroll when showing receipt
+    if (currentTab !== 'graph') return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 0.91;
-    // Zoom towards cursor position
     const rect = view.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -173,13 +193,21 @@ async function fetchJSON(url) {
   return r.json();
 }
 
+const MAX_PROCS = 1500;
+
 async function refreshContainers() {
   try {
     const containers = await fetchJSON('/containers');
     const list = document.getElementById('container-list');
     list.innerHTML = '';
-    containers.sort((a, b) => b.processes - a.processes);
-    for (const c of containers) {
+
+    // Filter: ignore 0 actions, ignore >1500 procs
+    const visible = containers.filter(c => c.completed_actions > 0 && c.processes <= MAX_PROCS);
+    const skippedZero = containers.filter(c => c.completed_actions === 0).length;
+    const skippedLarge = containers.filter(c => c.completed_actions > 0 && c.processes > MAX_PROCS).length;
+
+    visible.sort((a, b) => b.processes - a.processes);
+    for (const c of visible) {
       const div = document.createElement('div');
       div.className = 'container-item' + (selectedContainer === c.container_id ? ' active' : '');
       div.innerHTML = `
@@ -189,8 +217,21 @@ async function refreshContainers() {
       div.onclick = () => selectContainer(c.container_id);
       list.appendChild(div);
     }
+
+    // Show skip note if anything was filtered
+    const note = document.getElementById('skipped-note');
+    const parts = [];
+    if (skippedZero > 0) parts.push(`${skippedZero} with 0 actions`);
+    if (skippedLarge > 0) parts.push(`${skippedLarge} with >${MAX_PROCS} procs`);
+    if (parts.length > 0) {
+      note.textContent = `Hidden: ${parts.join(', ')}`;
+      note.classList.remove('hidden');
+    } else {
+      note.classList.add('hidden');
+    }
+
     document.getElementById('status-text').textContent =
-      `${containers.length} containers | ${new Date().toLocaleTimeString()}`;
+      `${visible.length} containers | ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     document.getElementById('status-text').textContent = 'Error: ' + e.message;
   }
@@ -198,45 +239,63 @@ async function refreshContainers() {
 
 async function selectContainer(id) {
   selectedContainer = id;
+  selectedAction = null;
   document.querySelectorAll('.container-item').forEach(el => {
     el.classList.toggle('active', el.querySelector('.cid').textContent === id);
   });
   document.getElementById('no-selection').classList.add('hidden');
-  await loadActionTabs();
+  await loadActionList();
   await loadTab();
 }
 
-async function loadActionTabs() {
+async function loadActionList() {
   if (!selectedContainer) return;
-  const actionTabsDiv = document.getElementById('action-tabs');
+  const actionList = document.getElementById('action-list');
   try {
     const data = await fetchJSON(`/containers/${selectedContainer}/actions`);
     let html = '';
+    // Snapshot entry (always first)
+    html += `<div class="action-item${selectedAction === null ? ' active' : ''}" onclick="selectAction(null)">
+      <div class="action-id">Snapshot</div>
+      <div class="action-cmd">Full container receipt</div>
+    </div>`;
     for (const a of (data.completed || [])) {
-      const short = a.command.length > 20 ? a.command.slice(0,20)+'...' : a.command;
-      html += `<div class="tab" data-tab="action-${a.action_id}" onclick="switchTab('action-${a.action_id}')">A${a.action_id}: ${short}</div>`;
+      const short = a.command.length > 40 ? a.command.slice(0,40)+'...' : a.command;
+      html += `<div class="action-item${selectedAction === a.action_id ? ' active' : ''}" onclick="selectAction(${a.action_id})">
+        <div class="action-id">Action ${a.action_id}</div>
+        <div class="action-cmd">${short}</div>
+      </div>`;
     }
-    actionTabsDiv.innerHTML = html;
+    actionList.innerHTML = html;
   } catch (e) {
-    actionTabsDiv.innerHTML = '';
+    actionList.innerHTML = '';
+  }
+}
+
+function selectAction(actionId) {
+  selectedAction = actionId;
+  // Update active state in action list
+  document.querySelectorAll('.action-item').forEach((el, i) => {
+    el.classList.toggle('active', actionId === null ? i === 0 : el.querySelector('.action-id').textContent === `Action ${actionId}`);
+  });
+  loadTab();
+}
+
+function updateActionSidebarVisibility() {
+  const actionSidebar = document.getElementById('action-sidebar');
+  if (currentTab === 'graph' || !selectedContainer) {
+    actionSidebar.classList.add('hidden');
+  } else {
+    actionSidebar.classList.remove('hidden');
   }
 }
 
 async function switchTab(tab) {
   currentTab = tab;
-  document.querySelectorAll('.tab').forEach(el => {
+  document.querySelectorAll('#tabs .tab').forEach(el => {
     el.classList.toggle('active', el.dataset.tab === tab);
   });
-  // Hide action tabs when viewing the graph
-  const actionTabs = document.getElementById('action-tabs');
-  const tabSep = document.querySelector('.tab-sep');
-  if (tab === 'graph') {
-    actionTabs.classList.add('hidden');
-    if (tabSep) tabSep.classList.add('hidden');
-  } else {
-    actionTabs.classList.remove('hidden');
-    if (tabSep) tabSep.classList.remove('hidden');
-  }
+  updateActionSidebarVisibility();
   await loadTab();
 }
 
@@ -245,17 +304,21 @@ async function loadTab() {
   const receiptView = document.getElementById('receipt-view');
   const graphView = document.getElementById('graph-view');
 
+  updateActionSidebarVisibility();
+
   if (currentTab === 'graph') {
     graphView.classList.remove('hidden');
     receiptView.classList.add('hidden');
+    const loading = document.getElementById('graph-loading');
+    loading.classList.remove('hidden');
     try {
       const r = await fetch(`/containers/${selectedContainer}/graph`);
       const dot = await r.text();
-      // Render DOT to SVG client-side using viz.js
       if (typeof Viz === 'undefined') {
         document.getElementById('graph-inner').innerHTML = '<div style="color:#888;padding:20px">Loading renderer...</div>';
-        // viz.js not loaded yet — this shouldn't happen after init
       } else {
+        // Yield a frame so the spinner paints before the CPU-heavy render
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
         const svg = await Viz.instance().then(viz => viz.renderSVGElement(dot));
         const inner = document.getElementById('graph-inner');
         inner.innerHTML = '';
@@ -263,25 +326,22 @@ async function loadTab() {
         svg.style.width = 'auto';
         svg.style.height = 'auto';
       }
+      loading.classList.add('hidden');
       setTimeout(graphFit, 50);
     } catch (e) {
+      loading.classList.add('hidden');
       document.getElementById('graph-inner').innerHTML = '<div style="color:#c00;padding:20px">Error: ' + e.message + '</div>';
     }
-  } else if (currentTab === 'receipt') {
+  } else {
     receiptView.classList.remove('hidden');
     graphView.classList.add('hidden');
     try {
-      const data = await fetchJSON(`/containers/${selectedContainer}/receipt`);
-      receiptView.textContent = data.receipt || data.error || 'No data';
-    } catch (e) {
-      receiptView.textContent = 'Error: ' + e.message;
-    }
-  } else if (currentTab.startsWith('action-')) {
-    receiptView.classList.remove('hidden');
-    graphView.classList.add('hidden');
-    const actionId = currentTab.split('-')[1];
-    try {
-      const data = await fetchJSON(`/containers/${selectedContainer}/actions/${actionId}/receipt`);
+      let data;
+      if (selectedAction === null) {
+        data = await fetchJSON(`/containers/${selectedContainer}/receipt`);
+      } else {
+        data = await fetchJSON(`/containers/${selectedContainer}/actions/${selectedAction}/receipt`);
+      }
       receiptView.textContent = data.receipt || data.error || 'No data';
     } catch (e) {
       receiptView.textContent = 'Error: ' + e.message;
@@ -295,7 +355,7 @@ function startAutoRefresh() {
     if (!document.getElementById('auto-refresh-toggle').checked) return;
     await refreshContainers();
     if (selectedContainer) {
-      await loadActionTabs();
+      await loadActionList();
       await loadTab();
     }
   }, 5000);
