@@ -4,11 +4,9 @@
 
 Syscon is a host-side daemon that observes everything an AI agent does inside a container — every process it spawns, every file it touches, every network connection it opens — by intercepting syscalls at the kernel boundary via `seccomp-bpf` audit logging. It compresses this raw telemetry into structured, per-action **receipts** designed for consumption by a trusted monitor LLM.
 
-> The monitor sees the commands the agent *declares*, but not what those commands actually *do*. Syscon closes that gap.
+> The monitor sees the commands the agent *declares*, but not what those commands actually *do*. Syscon helps close that gap.
 
-<p align="center">
-  <img src="https://packet.science/syscon/screenshot.png" alt="Syscon web dashboard" width="800">
-</p>
+[Demo with a bunch of fancy graphs!](https://syscon.packet.science)
 
 ## Why
 
