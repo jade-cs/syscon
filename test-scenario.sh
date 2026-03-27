@@ -3,11 +3,30 @@ set -euo pipefail
 
 PORT="${SYSCON_PORT:-9903}"
 URL="http://localhost:$PORT"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROFILE="$SCRIPT_DIR/syscon-seccomp.json"
+LOGFILE="${SYSCON_LOGFILE:-/tmp/syscon-test.binlog}"
+
+# Check that the seccomp profile exists
+if [ ! -f "$PROFILE" ]; then
+    echo "ERROR: seccomp profile not found at $PROFILE"
+    echo "Run: ./target/release/syscon gen-profile --block-dangerous --output $PROFILE"
+    exit 1
+fi
+
+# Check daemon is reachable
+if ! curl -sf "$URL/status" > /dev/null 2>&1; then
+    echo "ERROR: syscon daemon not reachable at $URL"
+    echo "Start with: sudo ./target/release/syscon daemon --port $PORT --log-file $LOGFILE"
+    exit 1
+fi
 
 sudo docker rm -f syscon-demo 2>/dev/null || true
 
-echo "=== Launching container ==="
-CID=$(sudo docker run -d --name syscon-demo alpine sh -c 'sleep 600')
+echo "=== Launching container with syscon seccomp profile ==="
+CID=$(sudo docker run -d --name syscon-demo \
+    --security-opt "seccomp=$PROFILE" \
+    alpine sh -c 'sleep 600')
 S=${CID:0:12}
 echo "Container: $S"
 sleep 2
@@ -73,11 +92,26 @@ for i in 1 2 3 4 5; do
     echo ""
 done
 
-echo "=== Graph ==="
+echo "=== Status ==="
+curl -s "$URL/status" | python3 -c "import sys,json; j=json.load(sys.stdin); print(json.dumps(j, indent=2))"
+
+echo ""
+echo "=== Graph (bytes) ==="
 curl -s --max-time 5 "$URL/containers/$S/graph" | wc -c
-echo "bytes SVG"
+
+# Test binary log replay if log file exists
+if [ -f "$LOGFILE" ]; then
+    echo ""
+    echo "=== Binary log replay ==="
+    ./target/release/syscon replay -i "$LOGFILE" -f receipt | head -40
+    echo "..."
+
+    echo ""
+    echo "=== Log reduction analysis ==="
+    ./target/release/syscon reduce -i "$LOGFILE"
+fi
 
 echo ""
 echo "Dashboard: $URL/"
-echo "Graph SVG: $URL/containers/$S/graph"
-echo "Container $S is running."
+echo "Graph:     $URL/containers/$S/graph"
+echo "Container $S is running. Clean up with: sudo docker rm -f syscon-demo"

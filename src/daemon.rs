@@ -3,16 +3,24 @@ use std::sync::{Arc, Mutex as StdMutex};
 use anyhow::Result;
 use tokio::sync::Mutex;
 
-use crate::{audit, control, handlers};
+use crate::{audit, audit_rules, binlog, control, handlers, notifier, util};
 use crate::state::DaemonState;
 
 pub struct DaemonConfig {
     pub port: u16,
+    /// If set, write a binary syscall log to this path.
+    pub log_file: Option<String>,
+    /// If set, listen on this Unix socket for seccomp user notify fds.
+    pub notify_socket: Option<String>,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { port: 9900 }
+        Self {
+            port: 9900,
+            log_file: None,
+            notify_socket: None,
+        }
     }
 }
 
@@ -24,6 +32,11 @@ struct ResolvedEvent {
     cmdline: String,
     open_files: Vec<String>,
     net_connections: Vec<String>,
+    /// Pipe inode numbers from /proc/pid/fd (e.g., "pipe:[12345]" → 12345).
+    /// Used to create Pipe taint edges between processes sharing the same pipe.
+    pipe_inodes: Vec<u64>,
+    /// Resolved syscall arguments (populated in USER_NOTIF mode).
+    args: Option<binlog::SyscallArgs>,
 }
 
 pub async fn run(config: DaemonConfig) -> Result<()> {
@@ -35,11 +48,35 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     tracing::info!("syscon daemon starting");
     tracing::info!(fd = audit_fd, "audit socket opened");
 
+    // Install AUDIT_SYSCALL rules for path-bearing syscalls (hybrid mode).
+    // These give us resolved filenames and socket addresses from the kernel,
+    // eliminating the need for /proc/pid/fd reads on those syscalls.
+    match audit_rules::install_rules(audit_fd) {
+        Ok(n) => tracing::info!(rules = n, "hybrid audit rules installed"),
+        Err(e) => tracing::warn!("could not install audit rules (need CAP_AUDIT_CONTROL): {}", e),
+    }
+
+    // Optional binary log writer
+    let log_writer: Option<Arc<binlog::LogWriter>> = match &config.log_file {
+        Some(path) => {
+            let writer = binlog::LogWriter::open(
+                std::path::Path::new(path),
+                binlog::FLAG_AUDIT_MODE,
+            )?;
+            tracing::info!(path = %path, "binary log file opened");
+            Some(Arc::new(writer))
+        }
+        None => None,
+    };
+
     // Resolved event buffer: the audit thread does recv + PID resolution,
     // then pushes fully resolved events here. The async processor just
     // does fast in-memory dispatch — no /proc I/O.
     let event_buf: Arc<StdMutex<Vec<ResolvedEvent>>> =
         Arc::new(StdMutex::new(Vec::with_capacity(256)));
+
+    // Clone for notifier (if enabled)
+    let event_buf_for_notify = event_buf.clone();
 
     // Audit thread: recv + resolve PIDs (all /proc I/O here, on a dedicated OS thread)
     let buf_writer = event_buf.clone();
@@ -53,8 +90,12 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     // Async processor: drains resolved events every 200ms, updates state
     let process_state = state.clone();
     let buf_reader = event_buf;
+    let processor_log = log_writer.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+        // Track pipe inodes → (pid, container_id, ppid) for creating Pipe taint edges
+        // between sibling processes sharing the same pipe inode.
+        let mut pipe_registry: std::collections::HashMap<u64, (u32, String, u32)> = std::collections::HashMap::new();
         loop {
             interval.tick().await;
 
@@ -70,10 +111,31 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 
             tracing::debug!(events = batch.len(), "processing batch");
 
+            let timestamp = util::monotonic_ns();
+
+            // Write to binary log (non-blocking, just sends to channel)
+            if let Some(writer) = &processor_log {
+                for rev in &batch {
+                    writer.send(binlog::LogEntry::Syscall(Box::new(binlog::SyscallRecord {
+                        timestamp_ns: timestamp,
+                        wall_clock_ns: 0, // TODO: add wall clock
+                        pid: rev.event.pid,
+                        syscall_nr: rev.event.syscall,
+                        comm: rev.event.comm.clone(),
+                        exe: rev.event.exe.clone(),
+                        container_id: rev.container_id.clone(),
+                        ppid: rev.ppid,
+                        cmdline: rev.cmdline.clone(),
+                        open_files: rev.open_files.clone(),
+                        net_connections: rev.net_connections.clone(),
+                        args: None, // LOG mode — no arguments
+                    })));
+                }
+            }
+
             // Update state (tokio::Mutex — cooperates with Rocket)
             {
                 let mut state = process_state.lock().await;
-                let timestamp = monotonic_ns();
                 for rev in &batch {
                     let Some(cid) = &rev.container_id else { continue };
                     if !state.containers.contains_key(cid) {
@@ -86,12 +148,93 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                         );
                     }
                     let container = state.containers.get_mut(cid).unwrap();
-                    handlers::dispatch(container, &rev.event, timestamp, rev.ppid, &rev.cmdline, &rev.open_files, &rev.net_connections);
+                    handlers::dispatch(container, &rev.event, timestamp, rev.ppid, &rev.cmdline, &rev.open_files, &rev.net_connections, rev.args.as_ref());
+
+                    // Create Pipe taint edges from shared pipe inodes.
+                    // Only match sibling processes (same parent) that are NOT
+                    // shells — this captures pipeline data flow (cat | base64 | gzip)
+                    // while skipping shell plumbing and docker exec stdio pipes.
+                    let is_shell = matches!(
+                        rev.event.comm.as_str(),
+                        "sh" | "bash" | "dash" | "ash" | "zsh"
+                    );
+                    if !is_shell {
+                        for &inode in &rev.pipe_inodes {
+                            if let Some((other_pid, other_cid, other_ppid)) = pipe_registry.remove(&inode) {
+                                // Only connect siblings (same parent = same pipeline)
+                                if other_pid != rev.event.pid
+                                    && other_cid == *cid
+                                    && other_ppid == rev.ppid
+                                {
+                                    container.taint_graph.add_edge(
+                                        other_pid,
+                                        rev.event.pid,
+                                        format!("pipe:[{}]", inode),
+                                        crate::state::ChannelType::Pipe,
+                                        timestamp,
+                                    );
+                                }
+                            } else {
+                                pipe_registry.insert(inode, (rev.event.pid, cid.clone(), rev.ppid));
+                            }
+                        }
+                    }
                 }
             }
         }
     });
     tracing::info!("audit event processor started");
+
+    // Optional: seccomp user notify listener (USER_NOTIF mode)
+    let _notifier_handle = if let Some(socket_path) = &config.notify_socket {
+        let notify_buf = event_buf_for_notify.clone();
+        let socket_path = socket_path.clone();
+
+        let listener = notifier::NotifierListener::start(
+            notifier::NotifierConfig {
+                socket_path: std::path::PathBuf::from(&socket_path),
+            },
+            move |container_id, event| {
+                // Convert NotifyEvent into a ResolvedEvent and push to the
+                // shared buffer, just like the audit thread does.
+                let ppid = util::read_ppid(event.pid).unwrap_or(0);
+                let cmdline = read_cmdline(event.pid);
+                let (open_files, pipe_inodes) = read_open_files(event.pid);
+                let net_connections = Vec::new(); // TODO: read if needed
+
+                let audit_event = crate::audit::SeccompEvent {
+                    pid: event.pid,
+                    comm: event.comm,
+                    exe: event.exe,
+                    syscall: event.syscall_nr,
+                    arch: 0,
+                    ip: 0,
+                    code: 0x7FC0_0000, // SECCOMP_RET_USER_NOTIF
+                    sig: 0,
+                };
+
+                let resolved = ResolvedEvent {
+                    event: audit_event,
+                    container_id: Some(container_id),
+                    ppid,
+                    cmdline,
+                    open_files,
+                    net_connections,
+                    pipe_inodes,
+                    args: event.args,
+                };
+
+                let mut buf = notify_buf.lock().unwrap_or_else(|e| e.into_inner());
+                buf.push(resolved);
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("failed to start notifier: {}", e))?;
+
+        tracing::info!(socket = %socket_path, "seccomp user notify listener started");
+        Some(listener)
+    } else {
+        None
+    };
 
     // Rocket HTTP server
     let figment = rocket::Config::figment()
@@ -99,7 +242,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         .merge(("address", "0.0.0.0"))
         .merge(("log_level", "off"));
 
-    let rocket = control::rocket(state)
+    let rocket = control::rocket(state, log_writer)
         .configure(figment)
         .ignite()
         .await
@@ -117,6 +260,57 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 
 /// Blocking audit loop on a dedicated OS thread.
 /// Does recv + PID/ppid resolution (all /proc I/O), then pushes resolved events.
+/// Look up a container ID for a pid, walking up the ppid chain if the process
+/// has already exited and /proc/pid/cgroup is gone. This handles short-lived
+/// processes like `cat /etc/passwd` whose cgroup file disappears before we
+/// can read it — we find their parent's container instead.
+fn resolve_container(
+    pid: u32,
+    ppid_hint: u32,
+    pid_cache: &mut std::collections::HashMap<u32, Option<String>>,
+    ppid_cache: &std::collections::HashMap<u32, u32>,
+) -> Option<String> {
+    // Direct lookup first
+    if let Some(cached) = pid_cache.get(&pid) {
+        return cached.clone();
+    }
+
+    // Try reading /proc/pid/cgroup directly
+    if let Some(info) = crate::docker::container_from_pid(pid) {
+        pid_cache.insert(pid, Some(info.id.clone()));
+        return Some(info.id);
+    }
+
+    // Process might be dead — walk up ppid chain
+    let mut current = if ppid_hint > 0 { ppid_hint } else {
+        ppid_cache.get(&pid).copied().unwrap_or(0)
+    };
+    for _ in 0..10 {
+        if current == 0 || current == 1 {
+            break;
+        }
+        // Check cache (clone to release borrow)
+        let cached_result = pid_cache.get(&current).cloned();
+        if let Some(Some(cid)) = cached_result {
+            pid_cache.insert(pid, Some(cid.clone()));
+            return Some(cid);
+        }
+        // Try this ancestor's cgroup
+        if let Some(info) = crate::docker::container_from_pid(current) {
+            pid_cache.insert(current, Some(info.id.clone()));
+            pid_cache.insert(pid, Some(info.id.clone()));
+            return Some(info.id);
+        }
+        // Go up one more level
+        current = ppid_cache.get(&current).copied()
+            .or_else(|| util::read_ppid(current))
+            .unwrap_or(0);
+    }
+
+    pid_cache.insert(pid, None);
+    None
+}
+
 fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
     let mut pid_cache: std::collections::HashMap<u32, Option<String>> =
         std::collections::HashMap::new();
@@ -124,22 +318,124 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
         std::collections::HashMap::new();
     let mut cmdline_cache: std::collections::HashMap<u32, String> =
         std::collections::HashMap::new();
-    let mut files_cache: std::collections::HashMap<u32, Vec<String>> =
+    let mut files_cache: std::collections::HashMap<u32, (Vec<String>, Vec<u64>)> =
+        std::collections::HashMap::new();
+
+    // Accumulator for multi-record AUDIT_SYSCALL events, keyed by serial number.
+    let mut pending_events: std::collections::HashMap<u64, audit_rules::AuditSyscallEvent> =
         std::collections::HashMap::new();
 
     loop {
         match audit::try_recv(fd) {
-            Ok(audit::RecvResult::Event(event)) => {
-                let container_id = pid_cache
-                    .entry(event.pid)
-                    .or_insert_with(|| {
-                        crate::docker::container_from_pid(event.pid).map(|c| c.id)
-                    })
-                    .clone();
+            Ok(audit::RecvResult::Raw { msg_type, text }) => {
+                // Multi-record audit event (AUDIT_SYSCALL + PATH + SOCKADDR + EOE)
+                let serial = audit_rules::parse_serial(&text).unwrap_or(0);
+                if serial == 0 {
+                    continue;
+                }
 
+                let event = pending_events
+                    .entry(serial)
+                    .or_default();
+
+                match msg_type {
+                    audit_rules::AUDIT_SYSCALL_TYPE => {
+                        event.serial = serial;
+                        audit_rules::parse_syscall_record(&text, event);
+                    }
+                    audit_rules::AUDIT_PATH_TYPE => {
+                        audit_rules::parse_path_record(&text, event);
+                    }
+                    audit_rules::AUDIT_CWD_TYPE => {
+                        audit_rules::parse_cwd_record(&text, event);
+                    }
+                    audit_rules::AUDIT_SOCKADDR_TYPE => {
+                        audit_rules::parse_sockaddr_record(&text, event);
+                    }
+                    audit_rules::AUDIT_EXECVE_TYPE => {
+                        audit_rules::parse_execve_record(&text, event);
+                    }
+                    audit_rules::AUDIT_EOE_TYPE => {
+                        // End of event — process the complete event
+                        if let Some(mut complete) = pending_events.remove(&serial) {
+                            complete.complete = true;
+                            if complete.pid > 0 && complete.success {
+                                // Build SyscallArgs from the resolved data
+                                let args = binlog::SyscallArgs {
+                                    raw: [complete.a0, complete.a1, complete.a2, complete.a3, 0, 0],
+                                    resolved_path: complete.paths.first().cloned(),
+                                    resolved_path2: complete.paths.get(1).cloned(),
+                                    resolved_addr: complete.sockaddr.clone(),
+                                    flags: complete.a2,
+                                    return_value: complete.exit_value,
+                                };
+
+                                // Cache the ppid from the audit record (always available,
+                                // even if the process already exited)
+                                if complete.ppid > 0 {
+                                    ppid_cache.insert(complete.pid, complete.ppid);
+                                }
+                                let ppid = complete.ppid;
+
+                                let container_id = resolve_container(
+                                    complete.pid, ppid, &mut pid_cache, &ppid_cache,
+                                );
+
+                                cmdline_cache.entry(complete.pid).or_insert_with(|| {
+                                    if !complete.argv.is_empty() {
+                                        complete.argv.join(" ")
+                                    } else {
+                                        read_cmdline(complete.pid)
+                                    }
+                                });
+
+                                // For AUDIT_SYSCALL events, we get paths from the kernel —
+                                // no need to read /proc/pid/fd for these syscalls.
+                                let cmdline = cmdline_cache.get(&complete.pid).cloned().unwrap_or_default();
+
+                                let audit_event = crate::audit::SeccompEvent {
+                                    pid: complete.pid,
+                                    comm: complete.comm,
+                                    exe: complete.exe,
+                                    syscall: complete.syscall,
+                                    arch: 0,
+                                    ip: 0,
+                                    code: 0,
+                                    sig: 0,
+                                };
+
+                                let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                                b.push(ResolvedEvent {
+                                    event: audit_event,
+                                    container_id,
+                                    ppid,
+                                    cmdline,
+                                    open_files: complete.paths.clone(), // Use kernel-resolved paths
+                                    net_connections: Vec::new(),
+                                    pipe_inodes: Vec::new(), // Audit records don't have pipe info
+                                    args: Some(args),
+                                });
+                            }
+                        }
+                    }
+                    _ => {} // PROCTITLE etc — ignore
+                }
+
+                // Garbage collect stale pending events (older than 100 entries)
+                if pending_events.len() > 200 {
+                    let cutoff = serial.saturating_sub(100);
+                    pending_events.retain(|s, _| *s > cutoff);
+                }
+            }
+            Ok(audit::RecvResult::Event(event)) => {
+                // Resolve ppid first, then drop the borrow before resolving container
                 let ppid = *ppid_cache
                     .entry(event.pid)
-                    .or_insert_with(|| read_ppid(event.pid).unwrap_or(0));
+                    .or_insert_with(|| util::read_ppid(event.pid).unwrap_or(0));
+
+                let container_id = resolve_container(
+                    event.pid, ppid, &mut pid_cache, &ppid_cache,
+                );
 
                 // Refresh process info on key syscalls
                 let syscall_name = crate::syscalls::name(event.syscall);
@@ -175,7 +471,7 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                 };
 
                 let cmdline = cmdline_cache.get(&event.pid).cloned().unwrap_or_default();
-                let open_files = files_cache.get(&event.pid).cloned().unwrap_or_default();
+                let (open_files, pipe_inodes) = files_cache.get(&event.pid).cloned().unwrap_or_default();
 
                 let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
                 b.push(ResolvedEvent {
@@ -185,6 +481,8 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                     cmdline,
                     open_files,
                     net_connections,
+                    pipe_inodes,
+                    args: None, // LOG mode — no arguments
                 });
             }
             Ok(audit::RecvResult::Filtered | audit::RecvResult::WouldBlock) => {}
@@ -197,15 +495,16 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
 }
 
 /// Read open file descriptors for a process via /proc/{pid}/fd/.
-/// Returns a deduplicated list of paths, filtering out common noise.
-fn read_open_files(pid: u32) -> Vec<String> {
+/// Returns (files, pipe_inodes): deduplicated file paths and pipe inode numbers.
+fn read_open_files(pid: u32) -> (Vec<String>, Vec<u64>) {
     let fd_dir = format!("/proc/{}/fd", pid);
     let entries = match std::fs::read_dir(&fd_dir) {
         Ok(e) => e,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), Vec::new()),
     };
 
     let mut files = Vec::new();
+    let mut pipes = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     for entry in entries.flatten() {
@@ -213,11 +512,21 @@ fn read_open_files(pid: u32) -> Vec<String> {
             Ok(p) => p.to_string_lossy().to_string(),
             Err(_) => continue,
         };
-        // Skip common noise: pipes, sockets without info, /dev/null, /dev/pts
-        if link.starts_with("pipe:")
-            || link.starts_with("anon_inode:")
+        // Extract pipe inodes for inter-process pipe tracking
+        if let Some(rest) = link.strip_prefix("pipe:[")
+            && let Some(inode_str) = rest.strip_suffix(']')
+            && let Ok(inode) = inode_str.parse::<u64>()
+        {
+            if !pipes.contains(&inode) {
+                pipes.push(inode);
+            }
+            continue;
+        }
+        // Skip non-file entries
+        if link.starts_with("anon_inode:")
             || link == "/dev/null"
             || link.starts_with("/dev/pts/")
+            || link.starts_with("socket:")
         {
             continue;
         }
@@ -225,7 +534,7 @@ fn read_open_files(pid: u32) -> Vec<String> {
             files.push(link);
         }
     }
-    files
+    (files, pipes)
 }
 
 /// Read active network connections for a process from /proc/{pid}/net/tcp and tcp6.
@@ -239,11 +548,10 @@ fn read_net_connections(pid: u32, include_listen: bool) -> Vec<String> {
         for entry in entries.flatten() {
             if let Ok(link) = std::fs::read_link(entry.path()) {
                 let s = link.to_string_lossy();
-                if let Some(rest) = s.strip_prefix("socket:[") {
-                    if let Some(inode) = rest.strip_suffix(']') {
+                if let Some(rest) = s.strip_prefix("socket:[")
+                    && let Some(inode) = rest.strip_suffix(']') {
                         process_inodes.insert(inode.to_string());
                     }
-                }
             }
         }
     }
@@ -372,23 +680,3 @@ fn read_cmdline(pid: u32) -> String {
     }
 }
 
-fn read_ppid(pid: u32) -> Option<u32> {
-    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("PPid:\t") {
-            return rest.trim().parse().ok();
-        }
-    }
-    None
-}
-
-fn monotonic_ns() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-    }
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-}

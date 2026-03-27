@@ -1,42 +1,66 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use crate::communities;
 use crate::events::{FileOp, NetOp, ProcessOp};
+use crate::semantic;
 use crate::state::ContainerState;
+use crate::util;
 
 const RUNTIME_BINARIES: &[&str] = &["/runc", "/usr/bin/runc", "/usr/sbin/runc"];
 
-/// Decode hex-encoded kernel comm names (e.g. "6E706D2072756E" → "npm run")
-fn decode_comm(comm: &str) -> String {
-    if comm.len() > 8 && comm.chars().all(|c| c.is_ascii_hexdigit()) {
-        let bytes: Vec<u8> = (0..comm.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&comm[i..i + 2], 16).ok())
-            .collect();
-        if let Ok(s) = String::from_utf8(bytes) {
-            if s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-                return s;
-            }
-        }
-    }
-    comm.to_string()
-}
 
 /// Filter out paths that are artifacts of our /proc/fd resolution, not real files.
 fn is_noise_file(f: &str) -> bool {
-    if f == "/" || f == "/runc" {
+    // Root directory, runc binary
+    if f == "/" || f == "/runc" || f.is_empty() {
+        return true;
+    }
+    // /proc, /dev, /sys — kernel pseudo-filesystems
+    if f.starts_with("/proc/") || f.starts_with("/dev/") || f.starts_with("/sys/") {
+        return true;
+    }
+    // Shared libraries, dynamic linker, and binary paths — process infrastructure, not data
+    if f.contains(".so") || f.contains("ld-musl") || f.contains("ld-linux") {
+        return true;
+    }
+    // Standard binary directories (the exe itself is shown in PROCESSES)
+    if f.starts_with("/bin/") || f.starts_with("/sbin/") || f.starts_with("/usr/bin/") || f.starts_with("/usr/sbin/") {
+        return true;
+    }
+    // Library directories
+    if f.starts_with("/usr/lib/") || f.starts_with("/lib/") {
+        return true;
+    }
+    // Python bytecache
+    if f.contains("__pycache__") || f.ends_with(".pyc") {
         return true;
     }
     // Leaked /proc-internal paths (numeric prefix like /1234/setgroups)
-    if f.starts_with('/') {
-        if let Some(c) = f.chars().nth(1) {
-            if c.is_ascii_digit() {
+    if f.starts_with('/')
+        && let Some(c) = f.chars().nth(1)
+            && c.is_ascii_digit() {
                 return true;
             }
-        }
+    // Bare numbers (fd numbers, inodes from audit records)
+    if f.chars().all(|c| c.is_ascii_digit()) {
+        return true;
     }
-    // Socket/pipe references that leaked through with // prefix
+    // Socket/pipe/anon references
     if f.starts_with("//") || f.starts_with("socket:") || f.starts_with("pipe:") || f.starts_with("anon_inode:") {
+        return true;
+    }
+    // (null) from audit records
+    if f.contains("(null)") {
+        return true;
+    }
+    // Long hex strings (container IDs, hashes from audit)
+    if f.len() >= 12 && f.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // Bare filenames without path separators that look like audit noise
+    // (e.g., "installed", "triggers", "scripts.tar.gz.tmp")
+    if !f.contains('/') && !f.starts_with('.') {
         return true;
     }
     false
@@ -47,7 +71,7 @@ fn is_noise_file(f: &str) -> bool {
 /// → "/usr/share/doc/{curl, krb5, ...}/copyright"
 fn compress_file_list(files: &[String]) -> Vec<String> {
     if files.len() <= 4 {
-        return files.iter().map(|f| f.clone()).collect();
+        return files.to_vec();
     }
 
     // Group by parent directory
@@ -60,7 +84,7 @@ fn compress_file_list(files: &[String]) -> Vec<String> {
 
     let mut result = Vec::new();
     let mut dirs: Vec<_> = by_dir.iter().collect();
-    dirs.sort_by_key(|(d, _)| d.clone());
+    dirs.sort_by_key(|(d, _)| (*d).clone());
 
     for (dir, fnames) in dirs {
         if fnames.len() == 1 {
@@ -112,16 +136,8 @@ fn process_name(container: &ContainerState, pid: u32) -> String {
     container
         .process_table
         .get(&pid)
-        .map(|i| decode_comm(&i.comm))
+        .map(|i| util::decode_comm(&i.comm))
         .unwrap_or_else(|| "?".to_string())
-}
-
-fn process_cmd(container: &ContainerState, pid: u32) -> String {
-    container
-        .process_table
-        .get(&pid)
-        .map(|i| i.cmdline.clone())
-        .unwrap_or_default()
 }
 
 pub fn generate_receipt_from_action(
@@ -150,7 +166,7 @@ fn generate_receipt_inner(
 ) -> String {
     let mut out = String::with_capacity(4096);
 
-    let now = monotonic_ns();
+    let now = util::monotonic_ns();
     let start = if action.start_time == 0 {
         action.process_events.first().map(|e| e.timestamp).unwrap_or(now)
     } else {
@@ -168,12 +184,12 @@ fn generate_receipt_inner(
     writeln!(out).unwrap();
 
     write_process_summary(&mut out, container, action);
-    write_commands_run(&mut out, container, action);
-    write_process_tree(&mut out, container, &action_pids);
+    write_communities(&mut out, container, &action_pids);
     write_activity_summary(&mut out, container, action);
     write_files_observed(&mut out, container, &action_pids);
     write_data_flows(&mut out, container, action.action_id, &action_pids);
     write_network_summary(&mut out, container, &action_pids);
+    write_semantic_summary(&mut out, container, action.action_id);
 
     out
 }
@@ -181,22 +197,36 @@ fn generate_receipt_inner(
 /// Process summary: binaries and counts.
 fn write_process_summary(
     out: &mut String,
-    _container: &ContainerState,
+    container: &ContainerState,
     action: &crate::events::ActionLog,
 ) {
-    let mut exec_counts: HashMap<String, u32> = HashMap::new();
+    // Collect unique processes with their cmdlines, deduped and counted.
+    // Each entry: (exe, cmdline, count, taint_score)
+    let mut procs: Vec<(u32, String, String, f64)> = Vec::new(); // (pid, exe, cmdline, taint)
+    let mut seen_cmds: HashMap<String, usize> = HashMap::new();
     let mut exit_count = 0u32;
     let mut fork_count = 0u32;
 
     for event in &action.process_events {
         match event.operation {
             ProcessOp::Exec => {
-                let path = if RUNTIME_BINARIES.contains(&event.exe.as_str()) {
-                    continue; // skip runc from counts
+                if RUNTIME_BINARIES.contains(&event.exe.as_str()) {
+                    continue;
+                }
+                let cmdline = container
+                    .process_table
+                    .get(&event.pid)
+                    .map(|i| i.cmdline.clone())
+                    .unwrap_or_default();
+                let taint = container.process_table.taint_score(event.pid);
+                let normalized = normalize_cmd(&cmdline);
+                if let Some(&idx) = seen_cmds.get(&normalized) {
+                    // Already seen this command — just note it
+                    let _ = idx;
                 } else {
-                    event.exe.clone()
-                };
-                *exec_counts.entry(path).or_default() += 1;
+                    seen_cmds.insert(normalized, procs.len());
+                    procs.push((event.pid, event.exe.clone(), cmdline, taint));
+                }
             }
             ProcessOp::Fork => fork_count += 1,
             ProcessOp::Exit => exit_count += 1,
@@ -204,89 +234,44 @@ fn write_process_summary(
         }
     }
 
-    if exec_counts.is_empty() && fork_count == 0 {
+    if procs.is_empty() && fork_count == 0 {
         return;
     }
 
-    let total_exec: u32 = exec_counts.values().sum();
-    writeln!(out, "PROCESSES: {} spawned, {} exited", fork_count + total_exec, exit_count).unwrap();
+    writeln!(
+        out,
+        "PROCESSES: {} unique, {} forked, {} exited",
+        procs.len(),
+        fork_count,
+        exit_count,
+    )
+    .unwrap();
 
-    let mut sorted: Vec<_> = exec_counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-    for (binary, count) in &sorted {
-        if **count > 1 {
-            writeln!(out, "  {} (x{})", binary, count).unwrap();
+    for (pid, exe, cmdline, taint) in &procs {
+        let name = exe.rsplit('/').next().unwrap_or(exe);
+        let taint_str = if *taint > 0.0 {
+            format!(" (taint {:.0}%)", taint * 100.0)
         } else {
-            writeln!(out, "  {}", binary).unwrap();
+            String::new()
+        };
+        if !cmdline.is_empty() && *cmdline != *exe {
+            let short = if cmdline.len() > 100 {
+                let mut end = 97;
+                while end > 0 && !cmdline.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &cmdline[..end])
+            } else {
+                cmdline.clone()
+            };
+            writeln!(out, "  [{}] $ {}{}", name, short, taint_str).unwrap();
+        } else {
+            writeln!(out, "  [{}] pid {}{}", name, pid, taint_str).unwrap();
         }
     }
     writeln!(out).unwrap();
 }
 
-/// All unique commands run during this action (the most important section for the monitor).
-/// Deduplicated, with repeat counts. Sorted by first occurrence.
-fn write_commands_run(
-    out: &mut String,
-    container: &ContainerState,
-    action: &crate::events::ActionLog,
-) {
-    // Collect unique cmdlines, count duplicates.
-    // Normalize temp paths so commands differing only in random filenames
-    // (e.g. /tmp/ccYlVQ3o.s vs /tmp/ccXnI1OH.s) are grouped together.
-    let mut cmd_counts: Vec<(String, String, u32)> = Vec::new(); // (display, normalized, count)
-    let mut seen: HashMap<String, usize> = HashMap::new();
-
-    for event in &action.process_events {
-        if event.operation != ProcessOp::Exec {
-            continue;
-        }
-        let cmd = process_cmd(container, event.pid);
-        if cmd.is_empty()
-            || cmd.starts_with("runc")
-            || cmd == "/usr/bin/dash"
-            || cmd == "/bin/sh"
-        {
-            continue;
-        }
-        let normalized = normalize_cmd(&cmd);
-        if let Some(&idx) = seen.get(&normalized) {
-            cmd_counts[idx].2 += 1;
-        } else {
-            seen.insert(normalized.clone(), cmd_counts.len());
-            cmd_counts.push((cmd, normalized, 1));
-        }
-    }
-
-    if cmd_counts.is_empty() {
-        return;
-    }
-
-    writeln!(out, "COMMANDS RUN:").unwrap();
-    for (display, _normalized, count) in &cmd_counts {
-        // For display, show the normalized form if count > 1 (since the
-        // original is just one example), otherwise show original
-        let shown = if *count > 1 {
-            &_normalized
-        } else {
-            display
-        };
-        let short = if shown.len() > 120 {
-            let mut end = 117;
-            while end > 0 && !shown.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &shown[..end])
-        } else {
-            shown.clone()
-        };
-        if *count > 1 {
-            writeln!(out, "  $ {} (x{})", short, count).unwrap();
-        } else {
-            writeln!(out, "  $ {}", short).unwrap();
-        }
-    }
-    writeln!(out).unwrap();
-}
 
 /// Normalize a command string for deduplication.
 /// Replaces random-looking path components (temp files, hashes) with <TMP>
@@ -349,110 +334,37 @@ fn looks_like_temp_path(token: &str) -> bool {
     false
 }
 
-/// Compact process tree showing spawn hierarchy.
-/// Uses taint graph fork edges to build parent→children relationships.
-fn write_process_tree(
+/// Process communities — groups of related processes collapsed for readability.
+/// Only shown when there are communities with >3 members (otherwise the
+/// process tree is already readable).
+fn write_communities(
     out: &mut String,
     container: &ContainerState,
     action_pids: &std::collections::HashSet<u32>,
 ) {
-    if action_pids.is_empty() {
+    let comms = communities::detect_communities(container, action_pids);
+
+    // Only show if there are non-trivial communities (>3 members)
+    let large_communities: Vec<_> = comms.iter().filter(|c| c.members.len() > 3).collect();
+    if large_communities.is_empty() {
         return;
     }
 
-    // Build parent→children map from taint graph edges, scoped to this action
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut has_parent: std::collections::HashSet<u32> = std::collections::HashSet::new();
-
-    for edge in &container.taint_graph.edges {
-        if action_pids.contains(&edge.source_pid) && action_pids.contains(&edge.target_pid) {
-            children.entry(edge.source_pid).or_default().push(edge.target_pid);
-            has_parent.insert(edge.target_pid);
-        }
+    writeln!(out, "PROCESS COMMUNITIES:").unwrap();
+    for community in &large_communities {
+        writeln!(out, "{}", communities::format_community(container, community)).unwrap();
     }
 
-    // Roots: PIDs in this action that have no parent in this action
-    let mut roots: Vec<u32> = action_pids
+    // Summary of small communities
+    let small_count: usize = comms
         .iter()
-        .filter(|pid| !has_parent.contains(pid))
-        .copied()
-        .collect();
-    roots.sort();
-
-    // Skip if tree is trivial (0-1 nodes, no edges)
-    if children.is_empty() {
-        return;
-    }
-
-    writeln!(out, "PROCESS TREE:").unwrap();
-
-    // Render each root and its subtree
-    for root in &roots {
-        render_tree_node(out, container, *root, &children, 1, 0);
+        .filter(|c| c.members.len() <= 3)
+        .map(|c| c.members.len())
+        .sum();
+    if small_count > 0 {
+        writeln!(out, "  + {} individual processes", small_count).unwrap();
     }
     writeln!(out).unwrap();
-}
-
-/// Recursively render a process tree node with indentation.
-/// Collapses subtrees deeper than max_depth.
-fn render_tree_node(
-    out: &mut String,
-    container: &ContainerState,
-    pid: u32,
-    children: &HashMap<u32, Vec<u32>>,
-    indent: usize,
-    depth: usize,
-) {
-    let prefix = "  ".repeat(indent);
-    let name = process_name(container, pid);
-    let cmd = process_cmd(container, pid);
-
-    // Show process with its command
-    if !cmd.is_empty() && !cmd.starts_with("runc") {
-        let short_cmd = if cmd.len() > 80 {
-            let mut end = 77;
-            while end > 0 && !cmd.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &cmd[..end])
-        } else {
-            cmd
-        };
-        writeln!(out, "{}{}  $ {}", prefix, name, short_cmd).unwrap();
-    } else {
-        writeln!(out, "{}{}", prefix, name).unwrap();
-    }
-
-    let kids = match children.get(&pid) {
-        Some(k) => k,
-        None => return,
-    };
-
-    if depth >= 4 && !kids.is_empty() {
-        // Collapse deep subtrees
-        writeln!(out, "{}  └─ ({} children)", prefix, kids.len()).unwrap();
-        return;
-    }
-
-    // Group identical children (same comm) to avoid repetition
-    let mut by_name: HashMap<String, Vec<u32>> = HashMap::new();
-    for kid in kids {
-        let kid_name = process_name(container, *kid);
-        by_name.entry(kid_name).or_default().push(*kid);
-    }
-
-    for (kid_name, kid_pids) in &by_name {
-        if kid_pids.len() > 3 {
-            // Collapse repeated children
-            // Show one example, then count
-            render_tree_node(out, container, kid_pids[0], children, indent + 1, depth + 1);
-            writeln!(out, "{}  ... +{} more {} processes", prefix, kid_pids.len() - 1, kid_name).unwrap();
-        } else {
-            for kid in kid_pids {
-                render_tree_node(out, container, *kid, children, indent + 1, depth + 1);
-            }
-        }
-    }
 }
 
 /// Filesystem and network activity grouped by process name.
@@ -514,22 +426,36 @@ fn write_files_observed(
 ) {
     let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
 
+    // From /proc/pid/fd snapshots (may miss short-lived processes)
     for pid in action_pids {
         let info = match container.process_table.get(pid) {
             Some(i) => i,
             None => continue,
         };
-        if info.open_files.is_empty() {
-            continue;
-        }
-        let name = decode_comm(&info.comm);
+        let name = util::decode_comm(&info.comm);
         let files = by_name.entry(name).or_default();
         for f in &info.open_files {
-            if is_noise_file(f) {
+            if !is_noise_file(f) && !files.contains(f) {
+                files.push(f.clone());
+            }
+        }
+    }
+
+    // From file_nodes (kernel-resolved paths via AUDIT_SYSCALL — catches
+    // short-lived processes like `cat /etc/passwd` that exit before /proc/fd snapshot)
+    for (path, node) in &container.file_nodes {
+        if is_noise_file(path) {
+            continue;
+        }
+        // Include files read or opened by processes in this action
+        for (pid, _) in node.readers.iter().chain(node.executors.iter()) {
+            if !action_pids.contains(pid) {
                 continue;
             }
-            if !files.contains(f) {
-                files.push(f.clone());
+            let name = process_name(container, *pid);
+            let files = by_name.entry(name).or_default();
+            if !files.contains(path) {
+                files.push(path.clone());
             }
         }
     }
@@ -543,7 +469,7 @@ fn write_files_observed(
 
     writeln!(out, "FILES OBSERVED OPEN:").unwrap();
     let mut sorted: Vec<_> = by_name.iter().collect();
-    sorted.sort_by_key(|(name, _)| name.clone());
+    sorted.sort_by_key(|(name, _)| (*name).clone());
     for (name, files) in sorted {
         let compressed = compress_file_list(files);
         for line in &compressed {
@@ -663,7 +589,7 @@ fn write_network_summary(
 
     writeln!(out, "NETWORK:").unwrap();
     let mut sorted: Vec<_> = by_endpoint.iter().collect();
-    sorted.sort_by_key(|(addr, _)| addr.clone());
+    sorted.sort_by_key(|(addr, _)| (*addr).clone());
     for (addr, procs) in &sorted {
         if procs.len() == 1 {
             writeln!(out, "  {} -> {}", procs[0], addr).unwrap();
@@ -680,8 +606,13 @@ fn write_network_summary(
     writeln!(out).unwrap();
 }
 
-fn monotonic_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts); }
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+/// Semantic summary: high-level operations with MITRE ATT&CK mappings.
+fn write_semantic_summary(out: &mut String, container: &ContainerState, action_id: u64) {
+    let all_ops = semantic::detect_operations(container);
+    let ops: Vec<_> = all_ops.into_iter().filter(|op| op.action_id == action_id).collect();
+    let formatted = semantic::format_for_receipt(&ops);
+    if !formatted.is_empty() {
+        out.push_str(&formatted);
+    }
 }
+

@@ -14,6 +14,7 @@ pub struct FileEvent {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum FileOp {
     Open,
     OpenWrite,

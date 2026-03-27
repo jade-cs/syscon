@@ -56,6 +56,79 @@ const LOG_SYSCALLS: &[&str] = &[
     "dup3",
     "kill",
     "tgkill",
+    // Shared memory
+    "shmget",
+    "shmat",
+    "shmdt",
+    // Anonymous memory (fileless execution vector)
+    "memfd_create",
+    // Process debugging (injection vector — also in ERRNO list but tracked if allowed)
+    "ptrace",
+    // Hidden data flows — kernel-space transfers that bypass userspace monitoring
+    "sendfile",      // file→socket without touching userspace
+    "splice",        // fd→fd zero-copy (pipe↔socket, pipe↔file)
+    "tee",           // duplicate pipe data without consuming it
+    "copy_file_range", // file→file in kernel space
+];
+
+/// Syscalls to intercept with SCMP_ACT_NOTIFY (USER_NOTIF mode).
+/// This is a superset of LOG_SYSCALLS — we can capture arguments for all of these.
+const NOTIFY_SYSCALLS: &[&str] = &[
+    // Process lifecycle
+    "clone",
+    "clone3",
+    "fork",
+    "vfork",
+    "execve",
+    "execveat",
+    "exit_group",
+    // Network
+    "socket",
+    "connect",
+    "bind",
+    "accept",
+    "accept4",
+    "sendto",
+    "recvfrom",
+    // Filesystem — full set including read/write (we can see fd now)
+    "open",
+    "openat",
+    "openat2",
+    "creat",
+    // Note: close excluded from NOTIFY — extremely high-frequency and only yields fd number.
+    // read/write also excluded — they would block every I/O operation.
+    "unlink",
+    "unlinkat",
+    "rename",
+    "renameat",
+    "renameat2",
+    "chmod",
+    "fchmod",
+    "fchmodat",
+    "chown",
+    "fchown",
+    "fchownat",
+    // IPC
+    "pipe",
+    "pipe2",
+    "dup",
+    "dup2",
+    "dup3",
+    "kill",
+    "tgkill",
+    // Shared memory
+    "shmget",
+    "shmat",
+    "shmdt",
+    // Anonymous memory
+    "memfd_create",
+    // Process debugging
+    "ptrace",
+    // Hidden data flows
+    "sendfile",
+    "splice",
+    "tee",
+    "copy_file_range",
 ];
 
 #[derive(Serialize)]
@@ -65,6 +138,12 @@ struct SeccompProfile {
     #[serde(rename = "archMap")]
     arch_map: Vec<ArchMap>,
     syscalls: Vec<SyscallGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "listenerPath")]
+    listener_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "listenerMetadata")]
+    listener_metadata: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -90,20 +169,40 @@ struct SyscallGroup {
 /// If `base` is Some, reads and patches an existing profile.
 /// Otherwise, generates a fresh profile with three tiers:
 ///   - ERRNO: dangerous syscalls blocked
-///   - LOG: monitored syscalls that generate audit events
+///   - LOG or NOTIFY: monitored syscalls
 ///   - ALLOW: everything else (defaultAction)
+///
+/// If `notify_socket` is Some, generates a USER_NOTIF profile that sends
+/// intercepted syscalls to the specified Unix socket path. This enables
+/// the daemon to read syscall arguments.
 pub fn generate_profile(
     base: Option<&str>,
     log_syscalls: Option<&[String]>,
     block_dangerous: bool,
+    notify_socket: Option<&str>,
 ) -> Result<String> {
     if let Some(base_path) = base {
         return patch_existing_profile(base_path, log_syscalls, block_dangerous);
     }
 
+    let use_notify = notify_socket.is_some();
+    let (action, action_comment, syscall_set) = if use_notify {
+        (
+            "SCMP_ACT_NOTIFY",
+            "syscon: intercepted syscalls — blocked until daemon responds (USER_NOTIF)",
+            NOTIFY_SYSCALLS,
+        )
+    } else {
+        (
+            "SCMP_ACT_LOG",
+            "syscon: monitored syscalls — allowed but generate AUDIT_SECCOMP events",
+            LOG_SYSCALLS,
+        )
+    };
+
     let log_names: Vec<String> = match log_syscalls {
         Some(names) => names.to_vec(),
-        None => LOG_SYSCALLS.iter().map(|s| s.to_string()).collect(),
+        None => syscall_set.iter().map(|s| s.to_string()).collect(),
     };
 
     let mut groups = vec![SyscallGroup {
@@ -112,12 +211,9 @@ pub fn generate_profile(
             n.sort();
             n
         },
-        action: "SCMP_ACT_LOG".to_string(),
+        action: action.to_string(),
         errno_ret: None,
-        comment: Some(
-            "syscon: monitored syscalls — allowed but generate AUDIT_SECCOMP events"
-                .to_string(),
-        ),
+        comment: Some(action_comment.to_string()),
     }];
 
     if block_dangerous {
@@ -145,6 +241,12 @@ pub fn generate_profile(
             },
         ],
         syscalls: groups,
+        listener_path: notify_socket.map(|s| s.to_string()),
+        listener_metadata: if use_notify {
+            Some("syscon".to_string())
+        } else {
+            None
+        },
     };
 
     let json = serde_json::to_string_pretty(&profile)?;
@@ -177,19 +279,18 @@ fn patch_existing_profile(
     // Remove target syscalls from existing ALLOW groups
     if let Some(syscalls) = profile.get_mut("syscalls").and_then(|v| v.as_array_mut()) {
         for group in syscalls.iter_mut() {
-            if group.get("action").and_then(|a| a.as_str()) == Some("SCMP_ACT_ALLOW") {
-                if let Some(names) = group.get_mut("names").and_then(|v| v.as_array_mut()) {
+            if group.get("action").and_then(|a| a.as_str()) == Some("SCMP_ACT_ALLOW")
+                && let Some(names) = group.get_mut("names").and_then(|v| v.as_array_mut()) {
                     names.retain(|n| {
-                        n.as_str().map_or(true, |s| !all_target.contains(s))
+                        n.as_str().is_none_or(|s| !all_target.contains(s))
                     });
                 }
-            }
         }
         // Remove empty groups
         syscalls.retain(|g| {
             g.get("names")
                 .and_then(|v| v.as_array())
-                .map_or(true, |a| !a.is_empty())
+                .is_none_or(|a| !a.is_empty())
         });
 
         // Insert LOG group at front
@@ -223,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_generate_profile_default_no_block() {
-        let json = generate_profile(None, None, false).unwrap();
+        let json = generate_profile(None, None, false, None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(v["defaultAction"], "SCMP_ACT_ALLOW");
@@ -241,7 +342,7 @@ mod tests {
 
     #[test]
     fn test_generate_profile_with_block() {
-        let json = generate_profile(None, None, true).unwrap();
+        let json = generate_profile(None, None, true, None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let syscalls = v["syscalls"].as_array().unwrap();
@@ -258,7 +359,7 @@ mod tests {
     #[test]
     fn test_generate_profile_custom_syscalls() {
         let custom = vec!["read".to_string(), "write".to_string()];
-        let json = generate_profile(None, Some(&custom), false).unwrap();
+        let json = generate_profile(None, Some(&custom), false, None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let log_names = v["syscalls"][0]["names"].as_array().unwrap();
         assert_eq!(log_names.len(), 2);

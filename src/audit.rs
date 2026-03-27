@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::mem;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-
-use crate::syscalls;
 
 // Kernel constants — see include/uapi/linux/audit.h and include/uapi/linux/netlink.h.
 const NETLINK_AUDIT: libc::c_int = 9; // Protocol number for audit netlink
@@ -15,17 +12,15 @@ const AUDIT_NLGRP_READLOG: u32 = 1; // Multicast group for read-only audit
 /// A parsed AUDIT_SECCOMP event (kernel audit message type 1326).
 /// Fields are extracted from the text payload of the netlink message.
 /// See kernel/auditsc.c :: audit_seccomp() for the format.
+#[allow(dead_code)]
 pub struct SeccompEvent {
     pub pid: u32,
     pub comm: String,
-    #[allow(dead_code)]
     pub exe: String,
     pub syscall: u32,
-    #[allow(dead_code)]
     pub arch: u32,
     pub ip: u64,
     pub code: u32,
-    #[allow(dead_code)]
     pub sig: u32,
 }
 
@@ -137,19 +132,13 @@ pub fn set_recv_timeout(fd: libc::c_int, ms: u64) {
 pub enum RecvResult {
     /// Got a SECCOMP event.
     Event(SeccompEvent),
-    /// Received a message but it wasn't AUDIT_SECCOMP — keep reading.
+    /// Got a raw audit message (type + payload text). Used for AUDIT_SYSCALL
+    /// and related multi-record types (PATH, SOCKADDR, CWD, EXECVE, EOE).
+    Raw { msg_type: u16, text: String },
+    /// Received a message but it wasn't relevant — keep reading.
     Filtered,
     /// No data available (EAGAIN / timeout / EINTR / ENOBUFS).
     WouldBlock,
-}
-
-/// Try to receive one AUDIT_SECCOMP event from the netlink socket.
-/// Returns Ok(None) on timeout, EINTR, or non-SECCOMP messages.
-pub fn try_recv_event(fd: libc::c_int) -> Result<Option<SeccompEvent>> {
-    match try_recv(fd)? {
-        RecvResult::Event(e) => Ok(Some(e)),
-        RecvResult::Filtered | RecvResult::WouldBlock => Ok(None),
-    }
 }
 
 /// Try to receive one audit message, distinguishing between
@@ -195,7 +184,15 @@ pub fn try_recv(fd: libc::c_int) -> Result<RecvResult> {
     let hdr = unsafe {
         std::ptr::read_unaligned(buf.as_ptr() as *const libc::nlmsghdr)
     };
-    if hdr.nlmsg_type != AUDIT_SECCOMP {
+    // Dispatch based on message type
+    let msg_type = hdr.nlmsg_type;
+    let is_seccomp = msg_type == AUDIT_SECCOMP;
+    let is_multi_record = matches!(
+        msg_type,
+        1300 | 1302 | 1306 | 1307 | 1309 | 1320 | 1327 // SYSCALL, PATH, SOCKADDR, CWD, EXECVE, EOE, PROCTITLE
+    );
+
+    if !is_seccomp && !is_multi_record {
         return Ok(RecvResult::Filtered);
     }
 
@@ -209,7 +206,14 @@ pub fn try_recv(fd: libc::c_int) -> Result<RecvResult> {
         .trim_end_matches('\0')
         .trim();
 
-    Ok(RecvResult::Event(parse_seccomp_event(text)))
+    if is_seccomp {
+        Ok(RecvResult::Event(parse_seccomp_event(text)))
+    } else {
+        Ok(RecvResult::Raw {
+            msg_type,
+            text: text.to_string(),
+        })
+    }
 }
 
 fn parse_seccomp_event(text: &str) -> SeccompEvent {
@@ -333,135 +337,3 @@ fn parse_audit_fields(text: &str) -> HashMap<String, String> {
     fields
 }
 
-pub fn print_event(event: &SeccompEvent) {
-    let name = syscalls::name(event.syscall);
-    let action = syscalls::action_name(event.code);
-    println!(
-        "[pid:{pid}] {comm} {name}({nr}) action={action} ip=0x{ip:x}",
-        pid = event.pid,
-        comm = event.comm,
-        nr = event.syscall,
-        ip = event.ip,
-    );
-}
-
-pub fn print_summary(counts: &HashMap<u32, u64>) {
-    if counts.is_empty() {
-        tracing::info!("No syscalls captured.");
-        return;
-    }
-
-    let mut entries: Vec<_> = counts.iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(a.1));
-
-    let total: u64 = counts.values().sum();
-    tracing::info!("--- Syscall Summary ---");
-    tracing::info!("{:<30} {:>8}", "SYSCALL", "COUNT");
-    tracing::info!("{}", "-".repeat(40));
-    for (nr, count) in &entries {
-        let name = syscalls::name(**nr);
-        tracing::info!("{:<30} {:>8}", format!("{name}({nr})"), count);
-    }
-    tracing::info!("{}", "-".repeat(40));
-    tracing::info!("{:<30} {:>8}", "TOTAL", total);
-}
-
-/// Monitor mode: listen for AUDIT_SECCOMP events system-wide.
-pub fn monitor(pid_filter: Option<u32>, stop: &AtomicBool) -> Result<()> {
-    let fd = open_audit_socket()?;
-    set_recv_timeout(fd, 200);
-
-    tracing::info!("Listening for seccomp audit events (AUDIT_SECCOMP)...");
-    if let Some(pid) = pid_filter {
-        tracing::info!(pid = pid, "Filtering for PID");
-    }
-    tracing::info!("Press Ctrl+C to stop.");
-
-    let mut counts: HashMap<u32, u64> = HashMap::new();
-
-    while !stop.load(Ordering::Relaxed) {
-        match try_recv_event(fd) {
-            Ok(Some(event)) => {
-                if let Some(pid) = pid_filter {
-                    if event.pid != pid {
-                        continue;
-                    }
-                }
-                *counts.entry(event.syscall).or_insert(0) += 1;
-                print_event(&event);
-            }
-            Ok(None) => continue,
-            Err(e) => {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                return Err(e);
-            }
-        }
-    }
-
-    print_summary(&counts);
-    // SAFETY: close(2) on the audit socket fd we opened.
-    unsafe { libc::close(fd) };
-    Ok(())
-}
-
-/// Trace a child process: receive AUDIT_SECCOMP events filtered by PID.
-/// The audit socket should be opened before the child is forked.
-pub fn trace_child(
-    fd: libc::c_int,
-    child_pid: libc::pid_t,
-    stop: &AtomicBool,
-) -> Result<HashMap<u32, u64>> {
-    set_recv_timeout(fd, 100);
-
-    let child_pid_u32 = child_pid as u32;
-    let mut counts: HashMap<u32, u64> = HashMap::new();
-
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-
-        // Check child status (non-blocking).
-        // SAFETY: waitpid(2) with WNOHANG on our direct child. This is
-        // async-signal-safe and does not block.
-        let mut status: libc::c_int = 0;
-        let ret = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
-        if ret == child_pid {
-            // Child exited — drain remaining audit events
-            drain_events(fd, child_pid_u32, &mut counts);
-            break;
-        }
-
-        match try_recv_event(fd) {
-            Ok(Some(event)) => {
-                if event.pid != child_pid_u32 {
-                    continue;
-                }
-                *counts.entry(event.syscall).or_insert(0) += 1;
-                print_event(&event);
-            }
-            Ok(None) => {}
-            Err(_) => {}
-        }
-    }
-
-    Ok(counts)
-}
-
-fn drain_events(fd: libc::c_int, pid: u32, counts: &mut HashMap<u32, u64>) {
-    let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_millis(200) {
-        match try_recv_event(fd) {
-            Ok(Some(event)) => {
-                if event.pid == pid {
-                    *counts.entry(event.syscall).or_insert(0) += 1;
-                    print_event(&event);
-                }
-            }
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
-}

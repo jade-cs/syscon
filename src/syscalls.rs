@@ -378,6 +378,7 @@ pub fn name(nr: u32) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub fn action_name(code: u32) -> &'static str {
     match code & 0xFFFF_0000 {
         0x0000_0000 => "kill_thread",

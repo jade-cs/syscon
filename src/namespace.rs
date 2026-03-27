@@ -5,6 +5,7 @@ use crate::state::ContainerBaseline;
 /// Scan the host filesystem to build a ContainerBaseline for a given
 /// container ID. Uses /proc to find container processes and accesses
 /// the container's root filesystem via /proc/{pid}/root/.
+#[allow(dead_code)]
 pub fn scan_baseline_for_container(container_id: &str) -> ContainerBaseline {
     let mut baseline = ContainerBaseline::new();
 

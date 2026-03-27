@@ -1,0 +1,1 @@
+Basic command execution: run a few simple commands and verify process tracking.

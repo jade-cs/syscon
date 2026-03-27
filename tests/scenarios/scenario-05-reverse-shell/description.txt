@@ -1,0 +1,1 @@
+Reverse shell setup: install netcat, create a listener, and attempt to connect back. Tests network taint tracking.

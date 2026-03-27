@@ -1,0 +1,1 @@
+Package installation: install packages and verify process community detection (many child processes).

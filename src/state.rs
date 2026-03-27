@@ -4,6 +4,9 @@ use serde::Serialize;
 
 use crate::events::ActionLog;
 
+/// Default threshold for considering a process "tainted" in receipts/graphs.
+pub const TAINT_THRESHOLD: f64 = 0.1;
+
 /// Information about a tracked process inside a container.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessInfo {
@@ -14,11 +17,21 @@ pub struct ProcessInfo {
     pub cmdline: String,
     pub open_files: Vec<String>,
     pub net_connections: Vec<String>,
-    pub tainted: bool,
+    /// Taint score: 0.0 = clean, 1.0 = fully tainted (entry point / direct agent control).
+    /// Intermediate values represent diminishing influence through IPC channels.
+    /// See MORSE (Hossain, Sheikhi, Sekar; S&P 2020) for the tag attenuation concept.
+    pub taint_score: f64,
     pub taint_source: String,
     pub is_original: bool,
     pub exited: bool,
     pub children: Vec<u32>,
+}
+
+impl ProcessInfo {
+    /// Whether this process is considered tainted (score above threshold).
+    pub fn is_tainted(&self) -> bool {
+        self.taint_score >= TAINT_THRESHOLD
+    }
 }
 
 /// A table of all known processes in a container, keyed by PID.
@@ -33,13 +46,13 @@ impl ProcessTable {
         let ppid = info.ppid;
         self.processes.insert(pid, info);
         // Register as child of parent
-        if let Some(parent) = self.processes.get_mut(&ppid) {
-            if !parent.children.contains(&pid) {
+        if let Some(parent) = self.processes.get_mut(&ppid)
+            && !parent.children.contains(&pid) {
                 parent.children.push(pid);
             }
-        }
     }
 
+    #[allow(dead_code)]
     pub fn remove(&mut self, pid: u32) {
         if let Some(info) = self.processes.remove(&pid) {
             // Remove from parent's children list
@@ -49,12 +62,13 @@ impl ProcessTable {
         }
     }
 
-    pub fn mark_tainted(&mut self, pid: u32, source: &str) {
-        if let Some(info) = self.processes.get_mut(&pid) {
-            if !info.tainted {
-                info.tainted = true;
-                info.taint_source = source.to_string();
-            }
+    /// Set the taint score for a process. Only updates if the new score is higher.
+    pub fn mark_tainted(&mut self, pid: u32, score: f64, source: &str) {
+        if let Some(info) = self.processes.get_mut(&pid)
+            && score > info.taint_score
+        {
+            info.taint_score = score;
+            info.taint_source = source.to_string();
         }
     }
 
@@ -62,8 +76,19 @@ impl ProcessTable {
         self.processes.get(pid)
     }
 
+    /// Get taint score for a process (0.0 if not found).
+    pub fn taint_score(&self, pid: u32) -> f64 {
+        self.processes
+            .get(&pid)
+            .map(|p| p.taint_score)
+            .unwrap_or(0.0)
+    }
+
+    #[allow(dead_code)]
     pub fn is_tainted(&self, pid: u32) -> bool {
-        self.processes.get(&pid).is_some_and(|p| p.tainted)
+        self.processes
+            .get(&pid)
+            .is_some_and(|p| p.is_tainted())
     }
 }
 
@@ -80,12 +105,40 @@ pub struct TaintEdge {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ChannelType {
     Fork,
     UnixSocket,
     Inet,
     Pipe,
     Signal,
+    /// Shared memory (shmget/shmat/shmdt or mmap MAP_SHARED)
+    SharedMemory,
+    /// ptrace attachment (process debugging/injection)
+    Ptrace,
+    /// memfd_create (anonymous file-backed memory, often used for fileless exec)
+    Memfd,
+    /// File-mediated data flow (process A writes file, process B reads it)
+    FileFlow,
+}
+
+impl ChannelType {
+    /// Decay factor for taint propagation through this channel type.
+    /// Based on MORSE (S&P 2020) tag attenuation: channels that transmit
+    /// more data/control inherit more taint from the source.
+    pub fn decay_factor(self) -> f64 {
+        match self {
+            ChannelType::Fork => 0.9,         // children strongly inherit parent taint
+            ChannelType::Pipe => 0.7,          // data flow, moderate inheritance
+            ChannelType::UnixSocket => 0.7,    // data flow, moderate inheritance
+            ChannelType::Inet => 0.8,          // significant data flow
+            ChannelType::Signal => 0.3,        // weak influence (kill/tgkill)
+            ChannelType::SharedMemory => 0.8,  // direct memory sharing, strong coupling
+            ChannelType::Ptrace => 0.95,       // near-total control over target
+            ChannelType::Memfd => 0.7,         // anonymous file-backed memory
+            ChannelType::FileFlow => 0.5,      // indirect: writer → file → reader
+        }
+    }
 }
 
 impl std::fmt::Display for ChannelType {
@@ -96,6 +149,10 @@ impl std::fmt::Display for ChannelType {
             ChannelType::Inet => write!(f, "inet"),
             ChannelType::Pipe => write!(f, "pipe"),
             ChannelType::Signal => write!(f, "signal"),
+            ChannelType::SharedMemory => write!(f, "shm"),
+            ChannelType::Ptrace => write!(f, "ptrace"),
+            ChannelType::Memfd => write!(f, "memfd"),
+            ChannelType::FileFlow => write!(f, "file"),
         }
     }
 }
@@ -138,27 +195,50 @@ impl TaintGraph {
         });
     }
 
-    /// Propagate taint through the graph: if source is tainted and target is not,
-    /// mark target as tainted. Returns the set of newly tainted PIDs.
+    /// Propagate taint scores through the graph using MORSE-style decay.
+    ///
+    /// For each edge, the target's score is updated to:
+    ///   max(target.score, source.score * channel.decay_factor)
+    ///
+    /// This runs to fixpoint: edges are processed repeatedly until no score
+    /// increases. The decay factors prevent taint explosion — distant processes
+    /// get diminishing scores rather than full inheritance.
+    ///
+    /// Returns the set of newly tainted PIDs (those whose score crossed
+    /// the TAINT_THRESHOLD).
     pub fn propagate_taint(&self, process_table: &mut ProcessTable) -> Vec<u32> {
         let mut newly_tainted = Vec::new();
         let mut changed = true;
         while changed {
             changed = false;
             for edge in &self.edges {
-                let source_tainted = process_table.is_tainted(edge.source_pid);
-                // Skip if target is not in the process table (exited)
+                let source_score = process_table.taint_score(edge.source_pid);
+                if source_score < TAINT_THRESHOLD {
+                    continue;
+                }
+
                 let target_exists = process_table.processes.contains_key(&edge.target_pid);
                 if !target_exists {
                     continue;
                 }
-                let target_tainted = process_table.is_tainted(edge.target_pid);
-                if source_tainted && !target_tainted {
+
+                let propagated_score = source_score * edge.channel_type.decay_factor();
+                let current_target_score = process_table.taint_score(edge.target_pid);
+
+                // Only update if the propagated score exceeds what the target already has.
+                // Use a small epsilon to avoid infinite loops from floating point.
+                if propagated_score > current_target_score + 1e-9 {
+                    let was_tainted = current_target_score >= TAINT_THRESHOLD;
                     process_table.mark_tainted(
                         edge.target_pid,
-                        &format!("{} from pid {}", edge.channel_type, edge.source_pid),
+                        propagated_score,
+                        &format!("{} from pid {} (score {:.2}→{:.2})",
+                            edge.channel_type, edge.source_pid,
+                            source_score, propagated_score),
                     );
-                    newly_tainted.push(edge.target_pid);
+                    if !was_tainted && propagated_score >= TAINT_THRESHOLD {
+                        newly_tainted.push(edge.target_pid);
+                    }
                     changed = true;
                 }
             }
@@ -167,6 +247,7 @@ impl TaintGraph {
     }
 
     /// Return edges first seen after `since` timestamp.
+    #[allow(dead_code)]
     pub fn edges_since(&self, since: u64) -> Vec<&TaintEdge> {
         self.edges
             .iter()
@@ -177,6 +258,7 @@ impl TaintGraph {
 
 /// Known-good state of a container at startup.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ContainerBaseline {
     pub original_processes: HashMap<u32, String>, // pid -> exec_path
     pub original_binaries: HashSet<String>,
@@ -206,16 +288,16 @@ impl ContainerBaseline {
     }
 
     /// Check if a path matches any sensitive path pattern.
+    #[allow(dead_code)]
     pub fn is_sensitive(&self, path: &str) -> bool {
         for sp in &self.sensitive_paths {
             if sp.contains('*') {
                 // Simple glob: /home/*/.ssh matches /home/user/.ssh
                 let parts: Vec<&str> = sp.split('*').collect();
-                if parts.len() == 2 {
-                    if path.starts_with(parts[0]) && path.ends_with(parts[1]) {
+                if parts.len() == 2
+                    && path.starts_with(parts[0]) && path.ends_with(parts[1]) {
                         return true;
                     }
-                }
             } else if path.starts_with(sp) {
                 return true;
             }
@@ -230,6 +312,7 @@ impl ContainerBaseline {
 
 /// A tracked file in the container's filesystem.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileNode {
     pub path: String,
     /// PIDs that wrote/created this file, with the action_id when it happened
@@ -257,7 +340,22 @@ impl FileNode {
     }
 }
 
+/// What an open file descriptor points to.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum FdTarget {
+    /// A file path (from openat/open/creat).
+    File(String),
+    /// A network endpoint (from connect/bind/accept).
+    Network(String),
+    /// A socket with unknown endpoint (from socket()).
+    Socket { domain: u64 },
+    /// A pipe endpoint (from pipe/pipe2).
+    Pipe { inode: u64 },
+}
+
 /// Per-container state.
+#[allow(dead_code)]
 pub struct ContainerState {
     pub container_id: String,
     pub process_table: ProcessTable,
@@ -274,6 +372,9 @@ pub struct ContainerState {
     pub file_nodes: HashMap<String, FileNode>,
     /// Current action ID (for attributing file access to actions)
     pub current_action_id: u64,
+    /// Per-process fd table: (pid, fd_number) → what it points to.
+    /// Populated by openat/connect/socket/pipe, consumed by sendfile/splice.
+    pub fd_table: HashMap<(u32, u64), FdTarget>,
 }
 
 impl ContainerState {
@@ -290,6 +391,7 @@ impl ContainerState {
             seen_remote_addrs: HashSet::new(),
             file_nodes: HashMap::new(),
             current_action_id: 0,
+            fd_table: HashMap::new(),
         }
     }
 
@@ -311,7 +413,10 @@ impl ContainerState {
                 }
             }
             crate::events::FileOp::Read | crate::events::FileOp::Open => {
-                if !node.readers.contains(&entry) {
+                // Don't add as reader if already a writer (avoids false self-loops
+                // where cat > file shows as both writing and reading the same file)
+                let already_writer = node.writers.iter().any(|(p, _)| *p == pid);
+                if !already_writer && !node.readers.contains(&entry) {
                     node.readers.push(entry);
                 }
             }
@@ -328,6 +433,42 @@ impl ContainerState {
             crate::events::FileOp::Chmod | crate::events::FileOp::Chown | crate::events::FileOp::Rename => {
                 if !node.modifiers.contains(&entry) {
                     node.modifiers.push(entry);
+                }
+            }
+        }
+    }
+
+    /// Create FileFlow taint edges from file_nodes: if process A wrote a file
+    /// and process B read/executed it, add a FileFlow edge A→B.
+    /// This enables taint to propagate through file-mediated data channels.
+    pub fn build_file_flow_edges(&mut self) {
+        for (path, node) in &self.file_nodes {
+            // Skip noise paths
+            if path.starts_with("/proc/") || path.starts_with("/dev/")
+                || path.starts_with("/sys/") || path.starts_with("/usr/lib/")
+                || path.starts_with("/lib/") || path.contains(".so")
+            {
+                continue;
+            }
+
+            let writer_pids: HashSet<u32> = node.writers.iter().map(|(p, _)| *p).collect();
+            let reader_pids: HashSet<u32> = node.readers.iter()
+                .chain(node.executors.iter())
+                .map(|(p, _)| *p)
+                .collect();
+
+            // Create edges from each writer to each reader (that isn't also a writer)
+            for &writer in &writer_pids {
+                for &reader in &reader_pids {
+                    if writer != reader && !writer_pids.contains(&reader) {
+                        self.taint_graph.add_edge(
+                            writer,
+                            reader,
+                            format!("file:{}", path),
+                            ChannelType::FileFlow,
+                            0,
+                        );
+                    }
                 }
             }
         }
@@ -352,6 +493,7 @@ impl DaemonState {
 
     /// Look up or discover which container a PID belongs to.
     /// Returns None if the PID is not in any known container.
+    #[allow(dead_code)]
     pub fn container_for_pid(&mut self, pid: u32) -> Option<String> {
         if let Some(cached) = self.pid_cache.get(&pid) {
             return cached.clone();

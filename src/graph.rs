@@ -2,22 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::state::ContainerState;
-
-/// Decode hex-encoded kernel comm names (e.g. "6E706D2072756E" → "npm run")
-fn decode_comm(comm: &str) -> String {
-    if comm.len() > 8 && comm.chars().all(|c| c.is_ascii_hexdigit()) {
-        let bytes: Vec<u8> = (0..comm.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&comm[i..i + 2], 16).ok())
-            .collect();
-        if let Ok(s) = String::from_utf8(bytes) {
-            if s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-                return s;
-            }
-        }
-    }
-    comm.to_string()
-}
+use crate::util;
 
 fn escape_dot(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -107,6 +92,27 @@ const ACTION_COLORS: &[(&str, &str)] = &[
     ("#fce4ec", "#880e4f"), // 20 deep pink
 ];
 
+/// Blend a hex color toward gray (#e8e8e8) based on taint score.
+/// score=1.0 → full color, score=0.1 → mostly gray.
+fn taint_gradient(hex: &str, score: f64) -> String {
+    let score = score.clamp(0.0, 1.0);
+    // Parse hex color
+    let hex = hex.trim_start_matches('#');
+    if hex.len() != 6 {
+        return format!("#{hex}");
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(232);
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(232);
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(232);
+
+    // Blend with gray (0xe8 = 232)
+    let gray = 232.0;
+    let blend = |c: u8| -> u8 {
+        (gray + (c as f64 - gray) * score) as u8
+    };
+    format!("#{:02x}{:02x}{:02x}", blend(r), blend(g), blend(b))
+}
+
 fn action_color(action_id: u64) -> (&'static str, &'static str) {
     if action_id == 0 {
         return BASELINE_COLOR;
@@ -169,19 +175,29 @@ pub fn render_dot(container: &ContainerState) -> String {
     }
 
     // === PROCESS NODES ===
-    // Group processes by the action they were first seen in
+    // Limit to avoid crashing viz.js on large containers.
+    // Sort by taint score (most tainted first) so we show the interesting ones.
+    let mut process_list: Vec<_> = container.process_table.processes.iter().collect();
+    process_list.sort_by(|a, b| b.1.taint_score.partial_cmp(&a.1.taint_score).unwrap_or(std::cmp::Ordering::Equal));
+    let max_nodes = 50;
+    if process_list.len() > max_nodes {
+        writeln!(dot, "  // Showing top {} of {} processes (by taint score)", max_nodes, process_list.len()).unwrap();
+    }
+
     writeln!(dot, "  // Process nodes").unwrap();
-    for (pid, info) in &container.process_table.processes {
+    for &(pid, info) in process_list.iter().take(max_nodes) {
         // Determine which action this process belongs to
         let action_id = find_process_action(container, *pid);
-        let (fill, border) = if info.tainted {
+        let (fill, border) = if info.is_tainted() {
             let (f, b) = action_color(action_id);
-            (f, b)
+            // Blend with gray based on taint score for gradient effect
+            let fill = taint_gradient(f, info.taint_score);
+            (fill, b.to_string())
         } else {
-            ("#e8e8e8", "#999999")
+            ("#e8e8e8".to_string(), "#999999".to_string())
         };
 
-        let comm = decode_comm(if !info.comm.is_empty() { &info.comm } else { "?" });
+        let comm = util::decode_comm(if !info.comm.is_empty() { &info.comm } else { "?" });
 
         let cmd = if !info.cmdline.is_empty() && !info.cmdline.starts_with("runc") {
             Some(info.cmdline.clone())
@@ -191,18 +207,24 @@ pub fn render_dot(container: &ContainerState) -> String {
             None
         };
 
-        let mut pid_line = format!("pid {} | action #{}", pid, action_id);
-        if info.exited {
-            pid_line.push_str(" (exited)");
-        }
+        let pid_line = format!("pid {} | action #{}", pid, action_id);
 
-        // Build HTML label with word-wrapped cmdline
+        // Build HTML label
         let mut rows = Vec::new();
         rows.push(format!("<B>{}</B>", escape_html(&comm)));
         if let Some(cmd) = cmd {
-            rows.push(format!("<FONT POINT-SIZE=\"8\">$ {}</FONT>", wrap_html(&cmd, 55)));
+            rows.push(format!("<FONT POINT-SIZE=\"8\">$ {}</FONT>", wrap_html(&cmd, 40)));
         }
         rows.push(format!("<FONT POINT-SIZE=\"7\" COLOR=\"#666666\">{}</FONT>", escape_html(&pid_line)));
+        if info.taint_score > 0.0 {
+            let taint_color = if info.taint_score > 0.7 { "#cc0000" } else if info.taint_score > 0.3 { "#e65100" } else { "#666666" };
+            rows.push(format!(
+                "<FONT POINT-SIZE=\"7\" COLOR=\"{}\">taint {:.0}%{}</FONT>",
+                taint_color,
+                info.taint_score * 100.0,
+                if info.exited { " (exited)" } else { "" },
+            ));
+        }
 
         let label = rows
             .iter()
@@ -210,7 +232,7 @@ pub fn render_dot(container: &ContainerState) -> String {
             .collect::<Vec<_>>()
             .join("");
 
-        let style = if info.exited {
+        let _style = if info.exited {
             "filled,rounded,dashed"
         } else {
             "filled,rounded"
@@ -290,7 +312,7 @@ pub fn render_dot(container: &ContainerState) -> String {
                 .push((*pid, direction));
         }
     }
-    for (endpoint, procs) in &net_endpoints {
+    for endpoint in net_endpoints.keys() {
         // Skip localhost listen endpoints (noise)
         if endpoint.starts_with("0.0.0.0:") || endpoint.starts_with("[::]:") {
             // Only show listens if something connects to them
@@ -310,15 +332,19 @@ pub fn render_dot(container: &ContainerState) -> String {
     // === FORK EDGES ===
     writeln!(dot, "  // Fork/spawn edges").unwrap();
     for edge in &container.taint_graph.edges {
-        let color = if container.process_table.is_tainted(edge.source_pid) {
-            "#cc0000"
+        let source_score = container.process_table.taint_score(edge.source_pid);
+        let color = if source_score >= crate::state::TAINT_THRESHOLD {
+            // Gradient red based on score: 1.0 → #cc0000, 0.1 → #cc9999
+            let intensity = (source_score * 255.0) as u8;
+            format!("#cc{:02x}{:02x}", 255 - intensity, 255 - intensity)
         } else {
-            "#cccccc"
+            "#cccccc".to_string()
         };
+        let label = format!("{}", edge.channel_type);
         writeln!(
             dot,
-            "  p{} -> p{} [label=\"fork\", color=\"{}\", fontcolor=\"{}\", style=dashed, penwidth=1.0];",
-            edge.source_pid, edge.target_pid, color, color
+            "  p{} -> p{} [label=\"{}\", color=\"{}\", fontcolor=\"{}\", style=dashed, penwidth=1.0];",
+            edge.source_pid, edge.target_pid, escape_dot(&label), color, color
         )
         .unwrap();
     }
@@ -432,7 +458,7 @@ pub fn render_dot(container: &ContainerState) -> String {
     writeln!(dot, "    label=\"Legend\"; style=rounded; color=\"#cccccc\"; fontsize=10;").unwrap();
     writeln!(dot, "    node [shape=plaintext, fontsize=8];").unwrap();
     let mut legend_parts = Vec::new();
-    for (i, action) in container.completed_actions.iter().enumerate() {
+    for action in container.completed_actions.iter() {
         let (fill, _) = action_color(action.action_id);
         let cmd_short = if action.command.len() > 30 {
             &action.command[..30]
@@ -481,13 +507,28 @@ fn find_process_action(container: &ContainerState, pid: u32) -> u64 {
 }
 
 fn skip_path(path: &str) -> bool {
-    path.starts_with("/proc/")
+    path.is_empty()
+        || path == "/"
+        || path.starts_with("/proc/")
         || path.starts_with("/dev/")
         || path.starts_with("/sys/")
         || path.contains("(deleted)")
+        || path.contains("(null)")
         || path.starts_with("pipe:")
         || path.starts_with("anon_inode:")
         || path.starts_with("socket:")
+        || path.starts_with("//")
+        // Docker overlay2 paths (contain long hex layer IDs)
+        || path.contains("/overlay2/")
+        || path.contains("/docker/")
+        // Bare numbers (fd numbers, inodes)
+        || path.chars().all(|c| c.is_ascii_digit())
+        // Long hex strings (container IDs, hashes from audit)
+        || (path.len() >= 12 && path.chars().all(|c| c.is_ascii_hexdigit()))
+        // Path segments that are entirely hex and long (overlay hashes)
+        || path.split('/').any(|seg| seg.len() >= 20 && seg.chars().all(|c| c.is_ascii_hexdigit()))
+        // Bare filenames without path separators (audit noise like "installed", "triggers")
+        || (!path.contains('/') && !path.starts_with('.'))
 }
 
 fn is_sensitive_path(path: &str) -> bool {
@@ -513,32 +554,3 @@ fn path_id(path: &str) -> u64 {
     hash
 }
 
-/// Render DOT to SVG using the `dot` command.
-pub fn render_svg(dot: &str) -> Result<String, String> {
-    let mut child = std::process::Command::new("dot")
-        .arg("-Tsvg")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to spawn dot: {} (is graphviz installed?)", e))?;
-
-    {
-        use std::io::Write;
-        let stdin = child.stdin.as_mut().ok_or("no stdin")?;
-        stdin
-            .write_all(dot.as_bytes())
-            .map_err(|e| format!("write to dot stdin: {}", e))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("dot failed: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("dot error: {}", stderr));
-    }
-
-    String::from_utf8(output.stdout).map_err(|e| format!("dot output not utf8: {}", e))
-}

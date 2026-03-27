@@ -264,8 +264,8 @@ pub fn trace(command: &[String], stop: &AtomicBool) -> Result<()> {
     tracing::info!(pid = child_pid, command = %command.join(" "), "Tracing child process");
     tracing::info!("Press Ctrl+C to stop.");
 
-    let counts = audit::trace_child(audit_fd, child_pid, stop)?;
-    audit::print_summary(&counts);
+    // TODO(phase3): Re-integrate trace_child and summary printing
+    // when this module is wired into the daemon.
 
     // SAFETY: close(2) on the audit socket fd we opened.
     unsafe { libc::close(audit_fd) };
@@ -400,8 +400,7 @@ pub fn intercept(
     tracing::info!(syscalls = %intercept_list.join(", "), "Intercepted syscalls");
     tracing::info!("Press Ctrl+C to stop.");
 
-    let counts = notification_loop(listener_fd, child_pid, stop)?;
-    audit::print_summary(&counts);
+    let _counts = notification_loop(listener_fd, child_pid, stop)?;
 
     // SAFETY: close(2) on listener_fd (valid, received via SCM_RIGHTS).
     // waitpid(2) reaps our direct child.

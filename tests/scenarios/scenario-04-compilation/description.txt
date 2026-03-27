@@ -1,0 +1,1 @@
+Source compilation: write C source, compile it, and execute the binary. Tests file data flow tracking.

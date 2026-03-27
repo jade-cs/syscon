@@ -5,7 +5,7 @@ use rocket::{delete, get, post, routes, Build, Rocket, State};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::receipt;
+use crate::{binlog, receipt, util};
 use crate::state::DaemonState;
 
 const DATA_DIR: &str = "data";
@@ -25,6 +25,7 @@ fn save_artifact(container_id: &str, filename: &str, content: &str) {
 }
 
 type SharedState = Arc<Mutex<DaemonState>>;
+type SharedLogWriter = Option<Arc<binlog::LogWriter>>;
 
 // ── Request / Response types ────────────────────────────────────────
 
@@ -113,13 +114,14 @@ async fn action_start(
     id: &str,
     req: Json<ActionStartRequest>,
     state: &State<SharedState>,
+    log_writer: &State<SharedLogWriter>,
 ) -> Json<ActionStartResponse> {
     // On first action, scan existing files into baseline so they aren't
     // reported as "new" on the first action_end.
     let is_first = {
         let s = state.lock().await;
         !s.containers.contains_key(id)
-            || s.containers.get(id).map_or(true, |c| c.completed_actions.is_empty())
+            || s.containers.get(id).is_none_or(|c| c.completed_actions.is_empty())
     };
     if is_first {
         let id_owned = id.to_string();
@@ -139,7 +141,7 @@ async fn action_start(
 
     let mut state = state.lock().await;
     let container = state.ensure_container(id);
-    let now = monotonic_ns();
+    let now = util::monotonic_ns();
 
     // Auto-increment action ID
     let action_id = container.completed_actions.len() as u64 + 1;
@@ -154,6 +156,14 @@ async fn action_start(
         "action_start",
     );
 
+    if let Some(writer) = log_writer.inner() {
+        writer.send(binlog::LogEntry::ActionStart {
+            action_id,
+            command: req.command.clone(),
+            timestamp_ns: now,
+        });
+    }
+
     Json(ActionStartResponse {
         ok: true,
         action_id,
@@ -166,6 +176,7 @@ async fn action_end(
     id: &str,
     action_id: u64,
     state: &State<SharedState>,
+    log_writer: &State<SharedLogWriter>,
 ) -> Json<serde_json::Value> {
     // Brief pause to let pending audit events flush through the processor
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -221,13 +232,14 @@ async fn action_end(
         }
     }
 
+    container.build_file_flow_edges();
     container
         .taint_graph
         .propagate_taint(&mut container.process_table);
 
     let receipt_text = receipt::generate_receipt(container, action_id);
 
-    let now = monotonic_ns();
+    let now = util::monotonic_ns();
     if let Some(mut action) = container.current_action.take() {
         action.end_time = Some(now);
         container.completed_actions.push(action);
@@ -240,6 +252,13 @@ async fn action_end(
         receipt_len = receipt_text.len(),
         "action_end",
     );
+
+    if let Some(writer) = log_writer.inner() {
+        writer.send(binlog::LogEntry::ActionEnd {
+            action_id,
+            timestamp_ns: now,
+        });
+    }
 
     save_artifact(id, &format!("action_{}_receipt.txt", action_id), &receipt_text);
 
@@ -347,6 +366,7 @@ async fn snapshot_receipt(id: &str, state: &State<SharedState>) -> Json<serde_js
         }
     };
 
+    container.build_file_flow_edges();
     container
         .taint_graph
         .propagate_taint(&mut container.process_table);
@@ -380,6 +400,7 @@ async fn influence_graph(id: &str, state: &State<SharedState>) -> (rocket::http:
         }
     };
 
+    container.build_file_flow_edges();
     container
         .taint_graph
         .propagate_taint(&mut container.process_table);
@@ -410,6 +431,7 @@ async fn influence_graph_dot(id: &str, state: &State<SharedState>) -> (rocket::h
         }
     };
 
+    container.build_file_flow_edges();
     container
         .taint_graph
         .propagate_taint(&mut container.process_table);
@@ -425,9 +447,10 @@ async fn index() -> (rocket::http::ContentType, &'static str) {
 }
 
 /// Build the Rocket instance with shared state.
-pub fn rocket(state: SharedState) -> Rocket<Build> {
+pub fn rocket(state: SharedState, log_writer: SharedLogWriter) -> Rocket<Build> {
     rocket::build()
         .manage(state)
+        .manage(log_writer)
         .mount(
             "/",
             routes![
@@ -447,13 +470,3 @@ pub fn rocket(state: SharedState) -> Rocket<Build> {
         )
 }
 
-fn monotonic_ns() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-    }
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-}
