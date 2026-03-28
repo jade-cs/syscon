@@ -104,7 +104,7 @@ pub struct TaintEdge {
     pub event_count: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum ChannelType {
     Fork,
@@ -161,6 +161,8 @@ impl std::fmt::Display for ChannelType {
 #[derive(Debug, Clone, Default)]
 pub struct TaintGraph {
     pub edges: Vec<TaintEdge>,
+    /// Fast lookup index: (source, target, channel_type) → index in edges Vec.
+    edge_index: HashMap<(u32, u32, ChannelType), usize>,
 }
 
 impl TaintGraph {
@@ -174,16 +176,16 @@ impl TaintGraph {
         channel_type: ChannelType,
         timestamp: u64,
     ) {
-        for edge in &mut self.edges {
-            if edge.source_pid == source_pid
-                && edge.target_pid == target_pid
-                && edge.channel_type == channel_type
-            {
-                edge.last_seen = timestamp;
-                edge.event_count += 1;
-                return;
-            }
+        let key = (source_pid, target_pid, channel_type);
+        if let Some(&idx) = self.edge_index.get(&key)
+            && let Some(edge) = self.edges.get_mut(idx)
+        {
+            edge.last_seen = timestamp;
+            edge.event_count += 1;
+            return;
         }
+        let idx = self.edges.len();
+        self.edge_index.insert(key, idx);
         self.edges.push(TaintEdge {
             source_pid,
             target_pid,
@@ -441,13 +443,29 @@ impl ContainerState {
     /// Create FileFlow taint edges from file_nodes: if process A wrote a file
     /// and process B read/executed it, add a FileFlow edge A→B.
     /// This enables taint to propagate through file-mediated data channels.
+    ///
+    /// Only processes files that have BOTH writers and readers (cross-process flow).
+    /// Skips library/system paths since those are process infrastructure, not data flow.
     pub fn build_file_flow_edges(&mut self) {
+        // Track which (writer, reader) pairs we've already added to avoid
+        // the expensive linear scan in add_edge on repeated calls.
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+
         for (path, node) in &self.file_nodes {
-            // Skip noise paths
+            // Skip noise/infrastructure paths
             if path.starts_with("/proc/") || path.starts_with("/dev/")
                 || path.starts_with("/sys/") || path.starts_with("/usr/lib/")
                 || path.starts_with("/lib/") || path.contains(".so")
+                || path.starts_with("/usr/include/")
+                || path.starts_with("/usr/share/")
+                || path.starts_with("/etc/apk/")
+                || path.starts_with("/etc/terminfo/")
             {
+                continue;
+            }
+
+            // Skip files with no cross-process flow
+            if node.writers.is_empty() || (node.readers.is_empty() && node.executors.is_empty()) {
                 continue;
             }
 
@@ -457,10 +475,9 @@ impl ContainerState {
                 .map(|(p, _)| *p)
                 .collect();
 
-            // Create edges from each writer to each reader (that isn't also a writer)
             for &writer in &writer_pids {
                 for &reader in &reader_pids {
-                    if writer != reader && !writer_pids.contains(&reader) {
+                    if writer != reader && !writer_pids.contains(&reader) && seen.insert((writer, reader)) {
                         self.taint_graph.add_edge(
                             writer,
                             reader,
