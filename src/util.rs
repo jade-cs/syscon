@@ -21,7 +21,13 @@ pub fn decode_comm(comm: &str) -> String {
     if comm.len() > 8 && comm.chars().all(|c| c.is_ascii_hexdigit()) {
         let bytes: Vec<u8> = (0..comm.len())
             .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&comm[i..i + 2], 16).ok())
+            .filter_map(|i| {
+                if i + 2 <= comm.len() {
+                    u8::from_str_radix(&comm[i..i + 2], 16).ok()
+                } else {
+                    None
+                }
+            })
             .collect();
         if let Ok(s) = String::from_utf8(bytes)
             && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
