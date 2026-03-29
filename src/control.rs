@@ -179,15 +179,7 @@ async fn action_end(
     log_writer: &State<SharedLogWriter>,
 ) -> Json<serde_json::Value> {
     // Brief pause to let pending audit events flush through the processor
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Scan for new files OUTSIDE the lock (blocking I/O)
-    let new_files = tokio::task::spawn_blocking({
-        let id = id.to_string();
-        move || crate::namespace::scan_new_files(&id)
-    })
-    .await
-    .unwrap_or_default();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let mut state = state.lock().await;
 
@@ -201,37 +193,7 @@ async fn action_end(
         }
     };
 
-    // Record files not already in the baseline as written by this action
-    if !new_files.is_empty() {
-        let action_pid = container
-            .current_action
-            .as_ref()
-            .and_then(|a| a.process_events.first())
-            .map(|e| e.pid)
-            .unwrap_or(0);
-
-        let mut new_count = 0;
-        for path in &new_files {
-            // Only record if not already known
-            if !container.baseline.original_binaries.contains(path) {
-                container.record_file_access(
-                    path,
-                    action_pid,
-                    crate::events::FileOp::Write,
-                );
-                container.baseline.original_binaries.insert(path.clone());
-                new_count += 1;
-            }
-        }
-        if new_count > 0 {
-            tracing::info!(
-                action_id,
-                new_files = new_count,
-                "filesystem changes detected",
-            );
-        }
-    }
-
+    // File flow edges + taint propagation — lightweight since we optimized add_edge
     container.build_file_flow_edges();
     container
         .taint_graph
