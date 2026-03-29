@@ -116,29 +116,6 @@ async fn action_start(
     state: &State<SharedState>,
     log_writer: &State<SharedLogWriter>,
 ) -> Json<ActionStartResponse> {
-    // On first action, scan existing files into baseline so they aren't
-    // reported as "new" on the first action_end.
-    let is_first = {
-        let s = state.lock().await;
-        !s.containers.contains_key(id)
-            || s.containers.get(id).is_none_or(|c| c.completed_actions.is_empty())
-    };
-    if is_first {
-        let id_owned = id.to_string();
-        let existing = tokio::task::spawn_blocking(move || {
-            crate::namespace::scan_new_files(&id_owned)
-        })
-        .await
-        .unwrap_or_default();
-        if !existing.is_empty() {
-            let mut s = state.lock().await;
-            let container = s.ensure_container(id);
-            for path in existing {
-                container.baseline.original_binaries.insert(path);
-            }
-        }
-    }
-
     let mut state = state.lock().await;
     let container = state.ensure_container(id);
     let now = util::monotonic_ns();

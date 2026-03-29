@@ -439,41 +439,29 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                     event.pid, ppid, &mut pid_cache, &ppid_cache,
                 );
 
-                // Refresh process info on key syscalls
+                // With hybrid audit mode, AUDIT_SYSCALL records give us
+                // resolved paths for file syscalls and addresses for network
+                // syscalls. The SECCOMP event path only needs:
+                // - cmdline (once per pid, on exec)
+                // - open fds (once per pid, for pipe inode detection)
+                // No per-syscall /proc/pid/fd rescans or /proc/pid/net parses.
                 let syscall_name = crate::syscalls::name(event.syscall);
-                let refresh_files = matches!(
-                    syscall_name,
-                    "execve" | "execveat" | "openat" | "open" | "openat2"
-                        | "rename" | "renameat" | "renameat2"
-                        | "chmod" | "fchmod" | "fchmodat"
-                        | "unlink" | "unlinkat"
-                );
                 let is_exec = matches!(syscall_name, "execve" | "execveat");
                 if is_exec || !cmdline_cache.contains_key(&event.pid) {
                     cmdline_cache.insert(event.pid, read_cmdline(event.pid));
                 }
-                if refresh_files || !files_cache.contains_key(&event.pid) {
-                    files_cache.insert(event.pid, read_open_files(event.pid));
-                }
-
-                // Read network connections on network syscalls
-                let is_net = matches!(
-                    syscall_name,
-                    "connect" | "bind" | "accept" | "accept4" | "socket"
-                        | "sendto" | "recvfrom"
-                );
-                let include_listen = matches!(
-                    syscall_name,
-                    "bind" | "accept" | "accept4"
-                );
-                let net_connections = if is_net {
-                    read_net_connections(event.pid, include_listen)
-                } else {
-                    Vec::new()
-                };
+                // Read fds only once per process (for pipe inode detection)
+                files_cache.entry(event.pid).or_insert_with(|| read_open_files(event.pid));
 
                 let cmdline = cmdline_cache.get(&event.pid).cloned().unwrap_or_default();
                 let (open_files, pipe_inodes) = files_cache.get(&event.pid).cloned().unwrap_or_default();
+                // Network connections: only read on accept (for listen detection).
+                // connect/bind addresses come from AUDIT_SOCKADDR records.
+                let net_connections = if matches!(syscall_name, "accept" | "accept4") {
+                    read_net_connections(event.pid, true)
+                } else {
+                    Vec::new()
+                };
 
                 let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
                 b.push(ResolvedEvent {

@@ -114,6 +114,7 @@ fn scan_container_binaries(pid: u32) -> HashSet<String> {
 
 /// Scan a container's filesystem for recently modified files.
 /// Returns paths relative to the container root.
+#[allow(dead_code)]
 pub fn scan_new_files(container_id: &str) -> Vec<String> {
     let pid = match find_container_pid(container_id) {
         Some(p) => p,
