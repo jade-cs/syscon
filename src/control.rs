@@ -8,22 +8,6 @@ use tokio::sync::Mutex;
 use crate::{binlog, receipt, util};
 use crate::state::DaemonState;
 
-const DATA_DIR: &str = "data";
-
-/// Save content to data/{container_id}/{filename}, creating dirs as needed.
-/// Failures are logged but never block the response.
-fn save_artifact(container_id: &str, filename: &str, content: &str) {
-    let dir = format!("{}/{}", DATA_DIR, container_id);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("failed to create {}: {}", dir, e);
-        return;
-    }
-    let path = format!("{}/{}", dir, filename);
-    if let Err(e) = std::fs::write(&path, content) {
-        tracing::warn!("failed to write {}: {}", path, e);
-    }
-}
-
 type SharedState = Arc<Mutex<DaemonState>>;
 type SharedLogWriter = Option<Arc<binlog::LogWriter>>;
 
@@ -101,7 +85,6 @@ async fn list_containers(state: &State<SharedState>) -> Json<Vec<ContainerInfo>>
 #[delete("/containers/<id>")]
 async fn delete_container(id: &str, state: &State<SharedState>) -> Json<serde_json::Value> {
     let mut state = state.lock().await;
-    // Also clear pid_cache entries pointing to this container
     state.pid_cache.retain(|_, v| v.as_deref() != Some(id));
     let removed = state.containers.remove(id).is_some();
     tracing::info!(container = %id, removed, "delete container");
@@ -120,7 +103,6 @@ async fn action_start(
     let container = state.ensure_container(id);
     let now = util::monotonic_ns();
 
-    // Auto-increment action ID
     let action_id = container.completed_actions.len() as u64 + 1;
     let action_log = crate::events::ActionLog::new(action_id, req.command.clone(), now);
     container.current_action = Some(action_log);
@@ -170,7 +152,8 @@ async fn action_end(
         }
     };
 
-    // File flow edges + taint propagation — lightweight since we optimized add_edge
+    // Build file flow edges and propagate taint — only on action_end,
+    // not on read-only receipt/graph endpoints.
     container.build_file_flow_edges();
     container
         .taint_graph
@@ -198,8 +181,6 @@ async fn action_end(
             timestamp_ns: now,
         });
     }
-
-    save_artifact(id, &format!("action_{}_receipt.txt", action_id), &receipt_text);
 
     Json(serde_json::json!({
         "ok": true,
@@ -275,7 +256,6 @@ async fn action_receipt(
     match action {
         Some(action) => {
             let receipt_text = receipt::generate_receipt_from_action(container, action);
-            save_artifact(id, &format!("action_{}_receipt.txt", action_id), &receipt_text);
             Json(serde_json::json!({
                 "ok": true,
                 "action_id": action_id,
@@ -290,7 +270,6 @@ async fn action_receipt(
 }
 
 /// Snapshot receipt: returns a receipt of everything accumulated so far.
-/// No action start/end needed — uses the global action that captures all events.
 #[get("/containers/<id>/receipt")]
 async fn snapshot_receipt(id: &str, state: &State<SharedState>) -> Json<serde_json::Value> {
     let mut state = state.lock().await;
@@ -305,6 +284,7 @@ async fn snapshot_receipt(id: &str, state: &State<SharedState>) -> Json<serde_js
         }
     };
 
+    // Propagate taint for snapshot (may not have had an action_end yet)
     container.build_file_flow_edges();
     container
         .taint_graph
@@ -316,7 +296,6 @@ async fn snapshot_receipt(id: &str, state: &State<SharedState>) -> Json<serde_js
         .map(|a| a.action_id)
         .unwrap_or(0);
     let receipt_text = receipt::generate_receipt(container, action_id);
-    save_artifact(id, "snapshot_receipt.txt", &receipt_text);
 
     Json(serde_json::json!({
         "ok": true,
@@ -327,9 +306,9 @@ async fn snapshot_receipt(id: &str, state: &State<SharedState>) -> Json<serde_js
 /// DOT source for the influence graph (rendered client-side via viz.js).
 #[get("/containers/<id>/graph")]
 async fn influence_graph(id: &str, state: &State<SharedState>) -> (rocket::http::ContentType, String) {
-    let mut state = state.lock().await;
+    let state = state.lock().await;
 
-    let container = match state.containers.get_mut(id) {
+    let container = match state.containers.get(id) {
         Some(c) => c,
         None => {
             return (
@@ -339,13 +318,7 @@ async fn influence_graph(id: &str, state: &State<SharedState>) -> (rocket::http:
         }
     };
 
-    container.build_file_flow_edges();
-    container
-        .taint_graph
-        .propagate_taint(&mut container.process_table);
-
     let dot = crate::graph::render_dot(container);
-    save_artifact(id, "graph.dot", &dot);
     (rocket::http::ContentType::new("text", "vnd.graphviz"), dot)
 }
 
@@ -358,9 +331,9 @@ async fn viz_js() -> (rocket::http::ContentType, &'static str) {
 /// Raw DOT source for the influence graph.
 #[get("/containers/<id>/graph.dot")]
 async fn influence_graph_dot(id: &str, state: &State<SharedState>) -> (rocket::http::ContentType, String) {
-    let mut state = state.lock().await;
+    let state = state.lock().await;
 
-    let container = match state.containers.get_mut(id) {
+    let container = match state.containers.get(id) {
         Some(c) => c,
         None => {
             return (
@@ -369,11 +342,6 @@ async fn influence_graph_dot(id: &str, state: &State<SharedState>) -> (rocket::h
             );
         }
     };
-
-    container.build_file_flow_edges();
-    container
-        .taint_graph
-        .propagate_taint(&mut container.process_table);
 
     let dot = crate::graph::render_dot(container);
     (rocket::http::ContentType::new("text", "vnd.graphviz"), dot)
@@ -408,4 +376,3 @@ pub fn rocket(state: SharedState, log_writer: SharedLogWriter) -> Rocket<Build> 
             ],
         )
 }
-
