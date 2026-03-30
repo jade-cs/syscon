@@ -444,10 +444,13 @@ fn write_files_observed(
     // From file_nodes (kernel-resolved paths via AUDIT_SYSCALL — catches
     // short-lived processes like `cat /etc/passwd` that exit before /proc/fd snapshot)
     for (path, node) in &container.file_nodes {
+        // Skip nodes with no readers/executors at all (vast majority of file_nodes)
+        if node.readers.is_empty() && node.executors.is_empty() {
+            continue;
+        }
         if is_noise_file(path) {
             continue;
         }
-        // Include files read or opened by processes in this action
         for (pid, _) in node.readers.iter().chain(node.executors.iter()) {
             if !action_pids.contains(pid) {
                 continue;
@@ -490,6 +493,10 @@ fn write_data_flows(
     let mut writes_by_dir: HashMap<String, Vec<String>> = HashMap::new();
 
     for (path, node) in &container.file_nodes {
+        // Skip nodes with no writers and no readers (common)
+        if node.writers.is_empty() && node.readers.is_empty() && node.executors.is_empty() {
+            continue;
+        }
         if path.starts_with("/proc/") || path.starts_with("/dev/")
             || path.starts_with("/sys/") || path.contains("(deleted)")
         {

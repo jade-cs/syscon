@@ -90,8 +90,12 @@ pub fn detect_operations(container: &ContainerState) -> Vec<SemanticOp> {
             }
         }
 
-        // Evaluate file-based rules (open/write to sensitive paths)
+        // Evaluate file-based rules (open/write to sensitive paths).
+        // Skip files with no writers (vast majority) for performance.
         for (path, node) in &container.file_nodes {
+            if node.writers.is_empty() {
+                continue;
+            }
             let action_writers: Vec<u32> = node
                 .writers
                 .iter()

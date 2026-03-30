@@ -136,7 +136,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             // Update state (tokio::Mutex — cooperates with Rocket).
             // Process in chunks to avoid holding the lock too long during
             // large batches, allowing API requests to interleave.
-            for chunk in batch.chunks(64) {
+            for chunk in batch.chunks(32) {
                 let mut state = process_state.lock().await;
                 for rev in chunk {
                     let Some(cid) = &rev.container_id else { continue };

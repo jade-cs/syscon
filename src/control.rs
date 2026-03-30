@@ -137,36 +137,39 @@ async fn action_end(
     state: &State<SharedState>,
     log_writer: &State<SharedLogWriter>,
 ) -> Json<serde_json::Value> {
-    // Brief pause to let pending audit events flush through the processor
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    let mut state = state.lock().await;
-
-    let container = match state.containers.get_mut(id) {
-        Some(c) => c,
-        None => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("unknown container: {}", id),
-            }));
-        }
-    };
-
-    // Build file flow edges and propagate taint — only on action_end,
-    // not on read-only receipt/graph endpoints.
-    container.build_file_flow_edges();
-    container
-        .taint_graph
-        .propagate_taint(&mut container.process_table);
-
-    let receipt_text = receipt::generate_receipt(container, action_id);
+    // Yield briefly to let any in-flight audit events reach the processor.
+    tokio::task::yield_now().await;
 
     let now = util::monotonic_ns();
-    if let Some(mut action) = container.current_action.take() {
-        action.end_time = Some(now);
-        container.completed_actions.push(action);
-    }
-    container.last_receipt_time = now;
+    let receipt_text;
+
+    {
+        let mut state = state.lock().await;
+
+        let container = match state.containers.get_mut(id) {
+            Some(c) => c,
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("unknown container: {}", id),
+                }));
+            }
+        };
+
+        // Build file flow edges and propagate taint
+        container.build_file_flow_edges();
+        container
+            .taint_graph
+            .propagate_taint(&mut container.process_table);
+
+        receipt_text = receipt::generate_receipt(container, action_id);
+
+        if let Some(mut action) = container.current_action.take() {
+            action.end_time = Some(now);
+            container.completed_actions.push(action);
+        }
+        container.last_receipt_time = now;
+    } // lock released here, before logging and binlog send
 
     tracing::info!(
         action_id,
