@@ -80,7 +80,7 @@ pub fn open_audit_socket() -> Result<libc::c_int> {
 
     // Enlarge the receive buffer to handle high event volumes.
     // Default is ~200KB which overflows easily under container load.
-    let buf_size: libc::c_int = 8 * 1024 * 1024; // 8 MB
+    let buf_size: libc::c_int = 64 * 1024 * 1024; // 64 MB
     // SAFETY: setsockopt with SO_RCVBUFFORCE bypasses rmem_max.
     // Falls back to SO_RCVBUF if we lack CAP_NET_ADMIN.
     unsafe {

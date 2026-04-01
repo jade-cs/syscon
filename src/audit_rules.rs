@@ -15,6 +15,7 @@ use std::mem;
 use anyhow::{Context, Result};
 
 /// Syscalls for which we install AUDIT_SYSCALL rules to get PATH/SOCKADDR records.
+#[allow(dead_code)]
 const AUDIT_SYSCALLS: &[(&str, u32)] = &[
     // File operations — get AUDIT_PATH records
     ("openat", 257),
@@ -68,6 +69,11 @@ const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
 /// Install audit rules for path-bearing syscalls.
 /// Uses `auditctl` command for reliable rule installation.
 /// Returns the number of rules installed.
+///
+/// WARNING: System-wide audit rules can overflow the netlink multicast buffer,
+/// causing SECCOMP events to be lost. Only enable when the audit log reader
+/// thread is used to consume events from /var/log/audit/audit.log.
+#[allow(dead_code)]
 pub fn install_rules(_audit_fd: libc::c_int) -> Result<usize> {
     // First, remove any stale rules from a previous run
     let _ = std::process::Command::new("auditctl")

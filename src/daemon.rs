@@ -51,10 +51,22 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     // Install AUDIT_SYSCALL rules for path-bearing syscalls (hybrid mode).
     // These give us resolved filenames and socket addresses from the kernel,
     // eliminating the need for /proc/pid/fd reads on those syscalls.
+    // Install AUDIT_SYSCALL rules for path-bearing syscalls.
+    // These events go to auditd (unicast), NOT to our multicast socket.
+    // The audit_log_reader thread tails /var/log/audit/audit.log to get them.
+    // We raised the netlink buffer to 64MB to handle the increased multicast
+    // traffic that system-wide rules can cause.
     match audit_rules::install_rules(audit_fd) {
         Ok(n) => tracing::info!(rules = n, "hybrid audit rules installed"),
         Err(e) => tracing::warn!("could not install audit rules (need CAP_AUDIT_CONTROL): {}", e),
     }
+
+    // Increase the audit backlog limit to avoid event drops
+    let _ = std::process::Command::new("auditctl").args(["-b", "65536"]).output();
+    // Also raise the system rmem_max so our 64MB buffer can be allocated
+    let _ = std::process::Command::new("sysctl")
+        .args(["-w", "net.core.rmem_max=67108864"])
+        .output();
 
     // Optional binary log writer
     let log_writer: Option<Arc<binlog::LogWriter>> = match &config.log_file {
@@ -77,6 +89,17 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 
     // Clone for notifier (if enabled)
     let event_buf_for_notify = event_buf.clone();
+
+    // Audit log reader thread: tails /var/log/audit/audit.log for our keyed
+    // AUDIT_SYSCALL events. These events go to auditd via unicast, NOT to our
+    // netlink multicast socket. This thread reads them from the log file and
+    // pushes resolved events to the shared buffer.
+    let audit_log_buf = event_buf.clone();
+    std::thread::Builder::new()
+        .name("audit-log-reader".into())
+        .spawn(move || {
+            audit_log_reader(audit_log_buf);
+        })?;
 
     // Audit thread: recv + resolve PIDs (all /proc I/O here, on a dedicated OS thread)
     let buf_writer = event_buf.clone();
@@ -364,6 +387,17 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                             // Process both successful AND failed syscalls —
                             // failed connects still have SOCKADDR with target IP,
                             // failed opens still have PATH records.
+                            // Log interesting events for debugging
+                            if !complete.paths.is_empty() || complete.sockaddr.is_some() {
+                                tracing::debug!(
+                                    pid = complete.pid,
+                                    syscall = complete.syscall,
+                                    success = complete.success,
+                                    paths = ?complete.paths,
+                                    sockaddr = ?complete.sockaddr,
+                                    "audit_syscall event"
+                                );
+                            }
                             if complete.pid > 0 && (complete.success || complete.sockaddr.is_some()) {
                                 // Build SyscallArgs from the resolved data
                                 let args = binlog::SyscallArgs {
@@ -385,6 +419,15 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                                 let container_id = resolve_container(
                                     complete.pid, ppid, &mut pid_cache, &ppid_cache,
                                 );
+
+                                if container_id.is_none() && !complete.paths.is_empty() {
+                                    tracing::debug!(
+                                        pid = complete.pid,
+                                        ppid,
+                                        paths = ?complete.paths,
+                                        "audit_syscall: container resolution FAILED"
+                                    );
+                                }
 
                                 cmdline_cache.entry(complete.pid).or_insert_with(|| {
                                     if !complete.argv.is_empty() {
@@ -491,6 +534,159 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                 tracing::error!("audit recv error: {:#}", e);
                 return;
             }
+        }
+    }
+}
+
+/// Read the audit log file (/var/log/audit/audit.log) for our keyed events.
+/// AUDIT_SYSCALL events are delivered to auditd via unicast, not our multicast
+/// netlink socket. This reader tails the log file and pushes resolved events.
+fn audit_log_reader(buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let log_path = "/var/log/audit/audit.log";
+    let file = match std::fs::File::open(log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("cannot open {}: {} (audit log reader disabled)", log_path, e);
+            return;
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    // Seek to end — we only want new events
+    let _ = reader.seek(SeekFrom::End(0));
+
+    let mut pid_cache: std::collections::HashMap<u32, Option<String>> =
+        std::collections::HashMap::new();
+    let mut ppid_cache: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::new();
+    let mut pending: std::collections::HashMap<u64, audit_rules::AuditSyscallEvent> =
+        std::collections::HashMap::new();
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                // EOF — sleep briefly and retry (tail -f behavior)
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+        }
+
+        // Only process our keyed events
+        if !line.contains("key=\"syscon\"") && !line.contains("key=syscon") {
+            continue;
+        }
+
+        let serial = audit_rules::parse_serial(&line).unwrap_or(0);
+        if serial == 0 {
+            continue;
+        }
+
+        // Determine message type from "type=XXXX"
+        let msg_type = if line.contains("type=SYSCALL") || line.contains("type=1300") {
+            audit_rules::AUDIT_SYSCALL_TYPE
+        } else if line.contains("type=PATH") || line.contains("type=1302") {
+            audit_rules::AUDIT_PATH_TYPE
+        } else if line.contains("type=CWD") || line.contains("type=1307") {
+            audit_rules::AUDIT_CWD_TYPE
+        } else if line.contains("type=SOCKADDR") || line.contains("type=1306") {
+            audit_rules::AUDIT_SOCKADDR_TYPE
+        } else if line.contains("type=EXECVE") || line.contains("type=1309") {
+            audit_rules::AUDIT_EXECVE_TYPE
+        } else if line.contains("type=EOE") || line.contains("type=1320") {
+            audit_rules::AUDIT_EOE_TYPE
+        } else {
+            continue;
+        };
+
+        let event = pending.entry(serial).or_default();
+
+        match msg_type {
+            audit_rules::AUDIT_SYSCALL_TYPE => {
+                event.serial = serial;
+                audit_rules::parse_syscall_record(&line, event);
+            }
+            audit_rules::AUDIT_PATH_TYPE => {
+                audit_rules::parse_path_record(&line, event);
+            }
+            audit_rules::AUDIT_CWD_TYPE => {
+                audit_rules::parse_cwd_record(&line, event);
+            }
+            audit_rules::AUDIT_SOCKADDR_TYPE => {
+                audit_rules::parse_sockaddr_record(&line, event);
+            }
+            audit_rules::AUDIT_EXECVE_TYPE => {
+                audit_rules::parse_execve_record(&line, event);
+            }
+            audit_rules::AUDIT_EOE_TYPE => {
+                if let Some(complete) = pending.remove(&serial)
+                    && complete.pid > 0
+                    && (complete.success || complete.sockaddr.is_some())
+                {
+                        let args = binlog::SyscallArgs {
+                            raw: [complete.a0, complete.a1, complete.a2, complete.a3, 0, 0],
+                            resolved_path: complete.paths.first().cloned(),
+                            resolved_path2: complete.paths.get(1).cloned(),
+                            resolved_addr: complete.sockaddr.clone(),
+                            flags: complete.a2,
+                            return_value: complete.exit_value,
+                        };
+
+                        if complete.ppid > 0 {
+                            ppid_cache.insert(complete.pid, complete.ppid);
+                        }
+
+                        let container_id = resolve_container(
+                            complete.pid, complete.ppid, &mut pid_cache, &ppid_cache,
+                        );
+
+                        if let Some(cid) = container_id {
+                            let cmdline = if !complete.argv.is_empty() {
+                                complete.argv.join(" ")
+                            } else {
+                                read_cmdline(complete.pid)
+                            };
+
+                            let audit_event = crate::audit::SeccompEvent {
+                                pid: complete.pid,
+                                comm: complete.comm,
+                                exe: complete.exe,
+                                syscall: complete.syscall,
+                                arch: 0,
+                                ip: 0,
+                                code: 0,
+                                sig: 0,
+                            };
+
+                            let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                            b.push(ResolvedEvent {
+                                event: audit_event,
+                                container_id: Some(cid),
+                                ppid: complete.ppid,
+                                cmdline,
+                                open_files: complete.paths.clone(),
+                                net_connections: Vec::new(),
+                                pipe_inodes: Vec::new(),
+                                args: Some(args),
+                            });
+                        }
+                    }
+                }
+            _ => {}
+        }
+
+        // GC stale pending events
+        if pending.len() > 500 {
+            let cutoff = serial.saturating_sub(200);
+            pending.retain(|s, _| *s > cutoff);
         }
     }
 }
