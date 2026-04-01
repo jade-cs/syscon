@@ -453,8 +453,16 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                 if is_exec || !cmdline_cache.contains_key(&event.pid) {
                     cmdline_cache.insert(event.pid, read_cmdline(event.pid));
                 }
-                // Read fds only once per process (for pipe inode detection)
-                files_cache.entry(event.pid).or_insert_with(|| read_open_files(event.pid));
+                // Read fds: on exec (new process image) and on first sight.
+                // Also refresh on file-open syscalls so we catch files opened
+                // after the initial snapshot (e.g., python3 opens api_tokens.json
+                // after it's already been running).
+                let refresh_fds = is_exec
+                    || !files_cache.contains_key(&event.pid)
+                    || matches!(syscall_name, "openat" | "open" | "openat2");
+                if refresh_fds {
+                    files_cache.insert(event.pid, read_open_files(event.pid));
+                }
 
                 let cmdline = cmdline_cache.get(&event.pid).cloned().unwrap_or_default();
                 let (open_files, pipe_inodes) = files_cache.get(&event.pid).cloned().unwrap_or_default();

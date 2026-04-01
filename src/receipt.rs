@@ -505,10 +505,9 @@ fn write_files_observed(
     let mut sorted: Vec<_> = by_name.iter().collect();
     sorted.sort_by_key(|(name, _)| (*name).clone());
     for (name, files) in sorted {
-        let compressed = compress_file_list(files);
-        for line in &compressed {
-            writeln!(out, "  {}: {}", name, line).unwrap();
-        }
+        let mut sorted_files = files.clone();
+        sorted_files.sort();
+        writeln!(out, "  {}: {}", name, sorted_files.join(", ")).unwrap();
     }
     writeln!(out).unwrap();
 }
@@ -615,43 +614,41 @@ fn write_network_summary(
     container: &ContainerState,
     action_pids: &std::collections::HashSet<u32>,
 ) {
-    let mut by_endpoint: HashMap<String, Vec<String>> = HashMap::new();
-    let mut listeners: Vec<String> = Vec::new();
+    // Group: process_name → (connect addrs, listen addrs)
+    let mut by_process: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
 
     for (pid, info) in &container.process_table.processes {
         if !action_pids.contains(pid) || info.net_connections.is_empty() {
             continue;
         }
         let name = process_name(container, *pid);
+        let entry = by_process.entry(name).or_default();
         for conn in &info.net_connections {
             if let Some(addr) = conn.strip_prefix("connect ") {
-                let names = by_endpoint.entry(addr.to_string()).or_default();
-                if !names.contains(&name) { names.push(name.clone()); }
-            } else if let Some(addr) = conn.strip_prefix("listen ") {
-                let entry = format!("{} on {}", name, addr);
-                if !listeners.contains(&entry) { listeners.push(entry); }
+                if !entry.0.contains(&addr.to_string()) {
+                    entry.0.push(addr.to_string());
+                }
+            } else if let Some(addr) = conn.strip_prefix("listen ")
+                && !entry.1.contains(&addr.to_string())
+            {
+                entry.1.push(addr.to_string());
             }
         }
     }
 
-    if by_endpoint.is_empty() && listeners.is_empty() {
+    if by_process.is_empty() {
         return;
     }
 
     writeln!(out, "NETWORK:").unwrap();
-    let mut sorted: Vec<_> = by_endpoint.iter().collect();
-    sorted.sort_by_key(|(addr, _)| (*addr).clone());
-    for (addr, procs) in &sorted {
-        if procs.len() == 1 {
-            writeln!(out, "  {} -> {}", procs[0], addr).unwrap();
-        } else {
-            writeln!(out, "  [{}] -> {}", procs.join(", "), addr).unwrap();
+    let mut sorted: Vec<_> = by_process.iter().collect();
+    sorted.sort_by_key(|(name, _)| (*name).clone());
+    for (name, (connects, listens)) in &sorted {
+        if !connects.is_empty() {
+            writeln!(out, "  {} -> {}", name, connects.join(", ")).unwrap();
         }
-    }
-    if !listeners.is_empty() {
-        writeln!(out, "  Listening:").unwrap();
-        for l in &listeners {
-            writeln!(out, "    {}", l).unwrap();
+        if !listens.is_empty() {
+            writeln!(out, "  {} listening on {}", name, listens.join(", ")).unwrap();
         }
     }
     writeln!(out).unwrap();
