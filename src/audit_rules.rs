@@ -184,9 +184,19 @@ pub fn parse_path_record(text: &str, event: &mut AuditSyscallEvent) {
     let fields = parse_fields(text);
     if let Some(name) = fields.get("name") {
         // Skip /proc paths — noise from our own /proc reads
-        if !name.starts_with("/proc/") {
-            event.paths.push(name.clone());
+        if name.starts_with("/proc/") {
+            return;
         }
+        // Strip container overlay prefix to get container-relative paths.
+        // Kernel audit returns host paths like:
+        //   /var/lib/containerd/.../fs/opt/configs/api_tokens.json
+        // We want: /opt/configs/api_tokens.json
+        let container_path = if let Some(idx) = name.find("/fs/") {
+            name[idx + 3..].to_string() // skip "/fs" to get "/opt/configs/..."
+        } else {
+            name.clone()
+        };
+        event.paths.push(container_path);
     }
 }
 

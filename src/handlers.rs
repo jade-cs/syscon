@@ -319,6 +319,15 @@ fn handle_open(container: &mut ContainerState, event: &SeccompEvent, timestamp: 
     if !path.is_empty() {
         container.record_file_access(&path, event.pid, op);
 
+        // Add to process open_files so it appears in FILES OBSERVED OPEN.
+        // This is critical for AUDIT_SYSCALL events where the /proc/pid/fd
+        // snapshot may miss short-lived file opens.
+        if let Some(info) = container.process_table.processes.get_mut(&event.pid)
+            && !info.open_files.contains(&path)
+        {
+            info.open_files.push(path.clone());
+        }
+
         // Record fd→path mapping. For AUDIT_SYSCALL, return_value is the new fd.
         if let Some(a) = args
             && a.return_value >= 0
@@ -408,7 +417,6 @@ fn handle_network(
     let remote_addr = args.and_then(|a| a.resolved_addr.clone());
 
     // Record fd→network endpoint for connect/bind.
-    // The socket fd is in args.raw[0] (first argument to connect/bind).
     if matches!(op, NetOp::Connect | NetOp::Bind)
         && let Some(a) = args
         && let Some(addr) = &remote_addr
@@ -417,6 +425,22 @@ fn handle_network(
             (event.pid, a.raw[0]),
             FdTarget::Network(addr.clone()),
         );
+    }
+
+    // Add resolved address to the process's net_connections so it shows
+    // in the NETWORK section of receipts. The receipt reads from process
+    // table, not from NetworkEvent.
+    if let Some(addr) = &remote_addr
+        && let Some(info) = container.process_table.processes.get_mut(&event.pid)
+    {
+        let conn_str = match op {
+            NetOp::Connect => format!("connect {addr}"),
+            NetOp::Bind => format!("listen {addr}"),
+            _ => String::new(),
+        };
+        if !conn_str.is_empty() && !info.net_connections.contains(&conn_str) {
+            info.net_connections.push(conn_str);
+        }
     }
 
     let net_event = NetworkEvent {

@@ -202,7 +202,7 @@ fn write_process_summary(
 ) {
     // Collect unique processes with their cmdlines, deduped and counted.
     // Each entry: (exe, cmdline, count, taint_score)
-    let mut procs: Vec<(u32, String, String, f64)> = Vec::new(); // (pid, exe, cmdline, taint)
+    let mut procs: Vec<(u32, String, String, f64, u32)> = Vec::new(); // (pid, exe, cmdline, taint, count)
     let mut seen_cmds: HashMap<String, usize> = HashMap::new();
     let mut exit_count = 0u32;
     let mut fork_count = 0u32;
@@ -219,13 +219,21 @@ fn write_process_summary(
                     .map(|i| i.cmdline.clone())
                     .unwrap_or_default();
                 let taint = container.process_table.taint_score(event.pid);
-                let normalized = normalize_cmd(&cmdline);
+                // Truncate to 100 chars BEFORE normalizing so commands that differ
+                // only at the end (like curl to different IPs) collapse together.
+                let truncated = if cmdline.len() > 100 {
+                    let mut end = 97;
+                    while end > 0 && !cmdline.is_char_boundary(end) { end -= 1; }
+                    format!("{}...", &cmdline[..end])
+                } else {
+                    cmdline.clone()
+                };
+                let normalized = normalize_cmd(&truncated);
                 if let Some(&idx) = seen_cmds.get(&normalized) {
-                    // Already seen this command — just note it
-                    let _ = idx;
+                    procs[idx].4 += 1; // increment count
                 } else {
                     seen_cmds.insert(normalized, procs.len());
-                    procs.push((event.pid, event.exe.clone(), cmdline, taint));
+                    procs.push((event.pid, event.exe.clone(), cmdline, taint, 1));
                 }
             }
             ProcessOp::Fork => fork_count += 1,
@@ -247,10 +255,15 @@ fn write_process_summary(
     )
     .unwrap();
 
-    for (pid, exe, cmdline, taint) in &procs {
+    for (pid, exe, cmdline, taint, count) in &procs {
         let name = exe.rsplit('/').next().unwrap_or(exe);
         let taint_str = if *taint > 0.0 {
             format!(" (taint {:.0}%)", taint * 100.0)
+        } else {
+            String::new()
+        };
+        let count_str = if *count > 1 {
+            format!(" (x{})", count)
         } else {
             String::new()
         };
@@ -264,9 +277,9 @@ fn write_process_summary(
             } else {
                 cmdline.clone()
             };
-            writeln!(out, "  [{}] $ {}{}", name, short, taint_str).unwrap();
+            writeln!(out, "  [{}] $ {}{}{}", name, short, count_str, taint_str).unwrap();
         } else {
-            writeln!(out, "  [{}] pid {}{}", name, pid, taint_str).unwrap();
+            writeln!(out, "  [{}] pid {}{}{}", name, pid, count_str, taint_str).unwrap();
         }
     }
     writeln!(out).unwrap();
