@@ -35,6 +35,8 @@ const AUDIT_SYSCALLS: &[(&str, u32)] = &[
     // Network operations — get AUDIT_SOCKADDR records
     ("connect", 42),
     ("bind", 49),
+    ("sendto", 44),   // UDP/QUIC sends destination addr in args, not via connect
+    ("sendmsg", 46),  // Same — may carry destination in msghdr
     // Hidden data flow syscalls — kernel-space transfers
     // These move data between fds without touching userspace, making them
     // invisible to traditional monitoring. We need audit records to see them.
@@ -209,10 +211,18 @@ pub fn parse_cwd_record(text: &str, event: &mut AuditSyscallEvent) {
 }
 
 /// Parse an AUDIT_SOCKADDR record. The `saddr` field is a hex-encoded sockaddr.
+/// Raw format: saddr=020001BB8EFBD3BB0000000000000000SADDR={...}
+/// The trailing "SADDR={...}" is an annotation we need to strip.
 pub fn parse_sockaddr_record(text: &str, event: &mut AuditSyscallEvent) {
     let fields = parse_fields(text);
     if let Some(saddr) = fields.get("saddr") {
-        event.sockaddr = decode_sockaddr(saddr);
+        // Strip trailing SADDR={...} annotation if present
+        let hex = if let Some(idx) = saddr.find("SADDR") {
+            &saddr[..idx]
+        } else {
+            saddr.as_str()
+        };
+        event.sockaddr = decode_sockaddr(hex);
     }
 }
 

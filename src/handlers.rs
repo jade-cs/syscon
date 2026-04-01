@@ -428,14 +428,14 @@ fn handle_network(
     }
 
     // Add resolved address to the process's net_connections so it shows
-    // in the NETWORK section of receipts. The receipt reads from process
-    // table, not from NetworkEvent.
+    // in the NETWORK section of receipts.
     if let Some(addr) = &remote_addr
         && let Some(info) = container.process_table.processes.get_mut(&event.pid)
     {
         let conn_str = match op {
             NetOp::Connect => format!("connect {addr}"),
             NetOp::Bind => format!("listen {addr}"),
+            NetOp::SendTo => format!("connect {addr}"), // UDP/QUIC: sendto carries dest addr
             _ => String::new(),
         };
         if !conn_str.is_empty() && !info.net_connections.contains(&conn_str) {
