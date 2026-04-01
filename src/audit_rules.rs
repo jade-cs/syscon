@@ -76,13 +76,36 @@ pub fn install_rules(_audit_fd: libc::c_int) -> Result<usize> {
 
     let mut count = 0;
     for (name, _nr) in AUDIT_SYSCALLS {
+        let mut args = vec![
+            "-a", "always,exit",
+            "-F", "arch=b64",
+            "-S", name,
+        ];
+
+        // Add extra filters for high-frequency syscalls to reduce noise
+        let extra_filter;
+        match *name {
+            // sendto: only capture when dest_addr (a4) is non-null
+            // (skip sends on already-connected sockets)
+            "sendto" => {
+                extra_filter = "-F a4!=0".to_string();
+                args.push(&extra_filter);
+            }
+            // Only capture successful syscalls for file/net ops
+            // (failed opens/connects are noise)
+            "openat" | "open" | "connect" | "bind" => {
+                args.push("-F");
+                args.push("success=1");
+            }
+            _ => {}
+        }
+
+        let key_arg = format!("key={AUDIT_KEY}");
+        args.push("-F");
+        args.push(&key_arg);
+
         let result = std::process::Command::new("auditctl")
-            .args([
-                "-a", "always,exit",
-                "-F", "arch=b64",
-                "-S", name,
-                "-F", &format!("key={AUDIT_KEY}"),
-            ])
+            .args(&args)
             .output();
 
         match result {
