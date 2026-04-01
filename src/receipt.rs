@@ -219,16 +219,9 @@ fn write_process_summary(
                     .map(|i| i.cmdline.clone())
                     .unwrap_or_default();
                 let taint = container.process_table.taint_score(event.pid);
-                // Truncate to 100 chars BEFORE normalizing so commands that differ
-                // only at the end (like curl to different IPs) collapse together.
-                let truncated = if cmdline.len() > 100 {
-                    let mut end = 97;
-                    while end > 0 && !cmdline.is_char_boundary(end) { end -= 1; }
-                    format!("{}...", &cmdline[..end])
-                } else {
-                    cmdline.clone()
-                };
-                let normalized = normalize_cmd(&truncated);
+                // Normalize for dedup: strip temp paths AND IP/URL variations
+                // so commands differing only in target collapse together.
+                let normalized = normalize_cmd_for_dedup(&cmdline);
                 if let Some(&idx) = seen_cmds.get(&normalized) {
                     procs[idx].4 += 1; // increment count
                 } else {
@@ -268,16 +261,7 @@ fn write_process_summary(
             String::new()
         };
         if !cmdline.is_empty() && *cmdline != *exe {
-            let short = if cmdline.len() > 100 {
-                let mut end = 97;
-                while end > 0 && !cmdline.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...", &cmdline[..end])
-            } else {
-                cmdline.clone()
-            };
-            writeln!(out, "  [{}] $ {}{}{}", name, short, count_str, taint_str).unwrap();
+            writeln!(out, "  [{}] $ {}{}{}", name, cmdline, count_str, taint_str).unwrap();
         } else {
             writeln!(out, "  [{}] pid {}{}{}", name, pid, count_str, taint_str).unwrap();
         }
@@ -286,9 +270,43 @@ fn write_process_summary(
 }
 
 
+/// Normalize a command string for dedup: strip temp paths, IPs, and URLs
+/// so commands differing only in target or temp file collapse together.
+fn normalize_cmd_for_dedup(cmd: &str) -> String {
+    let mut result = String::with_capacity(cmd.len());
+    for token in cmd.split(' ') {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        if looks_like_temp_path(token) {
+            result.push_str("<TMP>");
+        } else if looks_like_ip_or_url(token) {
+            result.push_str("<ADDR>");
+        } else {
+            result.push_str(token);
+        }
+    }
+    result
+}
+
+fn looks_like_ip_or_url(token: &str) -> bool {
+    // URLs
+    if token.starts_with("http://") || token.starts_with("https://") {
+        return true;
+    }
+    // IP:port or bare IP (N.N.N.N or N.N.N.N:port)
+    let base = token.split(':').next().unwrap_or(token);
+    let parts: Vec<&str> = base.split('.').collect();
+    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
+        return true;
+    }
+    false
+}
+
 /// Normalize a command string for deduplication.
 /// Replaces random-looking path components (temp files, hashes) with <TMP>
 /// so that commands differing only in generated filenames are grouped.
+#[allow(dead_code)]
 fn normalize_cmd(cmd: &str) -> String {
     let mut result = String::with_capacity(cmd.len());
     for token in cmd.split(' ') {
@@ -542,7 +560,20 @@ fn write_data_flows(
                     wnames.sort(); wnames.dedup();
                     flows.push(format!("  {} -[{}]-> {}", wnames.join(", "), path, consumers.join(", ")));
                 } else {
-                    flows.push(format!("  (prior) -[{}]-> {}", path, consumers.join(", ")));
+                    // Writer was in a prior action — show which action and process
+                    let mut wnames: Vec<String> = node.writers.iter()
+                        .map(|(p, aid)| {
+                            let name = process_name(container, *p);
+                            if *aid > 0 {
+                                format!("{} (action #{})", name, aid)
+                            } else {
+                                format!("{} (pre-existing)", name)
+                            }
+                        })
+                        .collect();
+                    wnames.sort();
+                    wnames.dedup();
+                    flows.push(format!("  {} -[{}]-> {}", wnames.join(", "), path, consumers.join(", ")));
                 }
             }
         }

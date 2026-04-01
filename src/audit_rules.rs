@@ -91,12 +91,15 @@ pub fn install_rules(_audit_fd: libc::c_int) -> Result<usize> {
                 extra_filter = "-F a4!=0".to_string();
                 args.push(&extra_filter);
             }
-            // Only capture successful syscalls for file/net ops
-            // (failed opens/connects are noise)
-            "openat" | "open" | "connect" | "bind" => {
+            // Only capture successful opens (skip ENOENT noise)
+            "openat" | "open" => {
                 args.push("-F");
                 args.push("success=1");
             }
+            // Capture ALL connect/bind — even failed ones show target IPs,
+            // which is critical for detecting exfiltration attempts
+            "connect" | "bind" => {}
+
             _ => {}
         }
 

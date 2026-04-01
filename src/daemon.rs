@@ -361,7 +361,10 @@ fn audit_recv_loop(fd: libc::c_int, buf: Arc<StdMutex<Vec<ResolvedEvent>>>) {
                         // End of event — process the complete event
                         if let Some(mut complete) = pending_events.remove(&serial) {
                             complete.complete = true;
-                            if complete.pid > 0 && complete.success {
+                            // Process both successful AND failed syscalls —
+                            // failed connects still have SOCKADDR with target IP,
+                            // failed opens still have PATH records.
+                            if complete.pid > 0 && (complete.success || complete.sockaddr.is_some()) {
                                 // Build SyscallArgs from the resolved data
                                 let args = binlog::SyscallArgs {
                                     raw: [complete.a0, complete.a1, complete.a2, complete.a3, 0, 0],
