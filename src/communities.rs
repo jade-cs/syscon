@@ -16,9 +16,21 @@ use std::collections::{HashMap, HashSet};
 use crate::state::{ChannelType, ContainerState};
 use crate::util;
 
+// ── Tuning constants ───────────────────────────────────────────────
+
+/// Minimum event_count on a non-fork edge before two communities are
+/// merged. Pipe/socket edges with fewer events are likely incidental
+/// (e.g., a brief status check), not sustained data flow.
+const COMMUNITY_MERGE_EVENT_THRESHOLD: u64 = 10;
+
+/// Max display width for a single-member community representative cmdline.
+const COMMUNITY_SINGLE_TRUNCATE: usize = 100;
+
+/// Max display width for a multi-member community representative cmdline.
+const COMMUNITY_MULTI_TRUNCATE: usize = 80;
+
 /// A community of related processes.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Community {
     /// Unique community ID (index).
     pub id: usize,
@@ -26,8 +38,6 @@ pub struct Community {
     pub label: String,
     /// PIDs in this community.
     pub members: Vec<u32>,
-    /// Total syscall events from all members.
-    pub total_events: u64,
     /// The PID with the longest cmdline (best representative).
     pub representative_pid: u32,
     /// Average taint score of members.
@@ -115,7 +125,6 @@ pub fn detect_communities(
                 id: community_id,
                 label: comm.clone(),
                 members: component,
-                total_events: 0, // filled in below
                 representative_pid: representative,
                 avg_taint_score: avg_score,
             });
@@ -125,13 +134,12 @@ pub fn detect_communities(
     // Step 3: Merge communities connected by high-weight non-fork edges
     // (pipe/socket with event_count > 10). This handles cases like
     // two different binaries that communicate heavily.
-    let merge_threshold = 10;
     let mut merges: Vec<(usize, usize)> = Vec::new();
     for edge in &container.taint_graph.edges {
         if edge.channel_type == ChannelType::Fork {
             continue;
         }
-        if edge.event_count < merge_threshold {
+        if edge.event_count < COMMUNITY_MERGE_EVENT_THRESHOLD {
             continue;
         }
         if let (Some(&c1), Some(&c2)) = (
@@ -186,7 +194,6 @@ pub fn detect_communities(
                     id: new_communities.len(),
                     label,
                     members: merged_members,
-                    total_events: 0,
                     representative_pid: representative,
                     avg_taint_score: avg_score,
                 });
@@ -220,13 +227,13 @@ pub fn format_community(container: &ContainerState, community: &Community) -> St
         .unwrap_or_else(|| community.label.clone());
 
     if count == 1 {
-        format!("  {}", truncate(&repr, 100))
+        format!("  {}", truncate(&repr, COMMUNITY_SINGLE_TRUNCATE))
     } else {
         format!(
             "  [{} x{}] {} (taint avg {:.0}%)",
             community.label,
             count,
-            truncate(&repr, 80),
+            truncate(&repr, COMMUNITY_MULTI_TRUNCATE),
             community.avg_taint_score * 100.0,
         )
     }

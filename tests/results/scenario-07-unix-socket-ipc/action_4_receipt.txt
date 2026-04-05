@@ -1,0 +1,5 @@
+=== Post-Action Receipt: Action #4 ===
+Command: cleanup build artifacts
+Duration: 2.2s | 0 syscall events
+
+

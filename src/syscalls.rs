@@ -1,4 +1,5 @@
 /// Map x86_64 syscall numbers to names.
+/// TODO: add a cite or pull from the kernel source itself
 pub fn name(nr: u32) -> &'static str {
     match nr {
         0 => "read",
@@ -378,17 +379,3 @@ pub fn name(nr: u32) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
-pub fn action_name(code: u32) -> &'static str {
-    match code & 0xFFFF_0000 {
-        0x0000_0000 => "kill_thread",
-        0x8000_0000 => "kill_process",
-        0x0003_0000 => "trap",
-        0x0005_0000 => "errno",
-        0x7FC0_0000 => "user_notif",
-        0x7FF0_0000 => "trace",
-        0x7FFC_0000 => "log",
-        0x7FFF_0000 => "allow",
-        _ => "unknown",
-    }
-}

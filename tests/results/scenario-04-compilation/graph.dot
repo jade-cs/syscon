@@ -1,0 +1,81 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2622993 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c cat &gt; /tmp/hello.c &lt;&lt;<BR/>  EOF\n#include<BR/>  &lt;stdio.h&gt;\n#include<BR/>  &lt;stdlib.h&gt;\nint main() {\n   <BR/>  FILE *f =<BR/>  fopen(&quot;/tmp/output.txt&quot;,<BR/>  &quot;w&quot;);\n    fprintf(f,<BR/>  &quot;compiled and running\n&quot;);\n<BR/>     fclose(f);\n    system(&quot;cat<BR/>  /etc/hostname&quot;);\n    return<BR/>  0;\n}\nEOF</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2622993 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623025 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>gcc</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ gcc -o /tmp/hello /tmp/hello.c</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623025 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623061 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fff9c4" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /tmp/output.txt</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623061 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623032 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>as</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /usr/lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../../../<BR/>  x86_64-alpine-linux-musl/bin/as --64<BR/>  -o /tmp/cccbFgpg.o /tmp/cchiEMac.s</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623032 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623067 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>hello</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /tmp/hello</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623067 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2622999 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2622999 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623031 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cc1</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /usr/libexec/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/cc1<BR/>  -quiet /tmp/hello.c -quiet -dumpdir<BR/>  /tmp/ -dumpbase hello.c -dumpbase-ext<BR/>  .c -mtune=generic -march=x86-64 -o<BR/>  /tmp/cchiEMac.s</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623031 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623033 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>collect2</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /usr/libexec/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/<BR/>  collect2 -plugin /usr/libexec/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/<BR/>  liblto_plugin.so -plugin-opt=/usr/<BR/>  libexec/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/lto-wrapper<BR/>  -plugin-opt=-fresolution=/tmp/<BR/>  ccfmGlJh.res<BR/>  -plugin-opt=-pass-through=-lgcc<BR/>  -plugin-opt=-pass-through=-lgcc_s<BR/>  -plugin-opt=-pass-through=-lc<BR/>  -plugin-opt=-pass-through=-lgcc<BR/>  -plugin-opt=-pass-through=-lgcc_s<BR/>  --build-id --eh-frame-hdr<BR/>  --hash-style=gnu -m elf_x86_64<BR/>  --as-needed -dynamic-linker<BR/>  /lib/ld-musl-x86_64.so.1 -pie -z now<BR/>  -o /tmp/hello /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../lib/Scrt1.o /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../lib/crti.o /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/<BR/>  crtbeginS.o -L/usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0 -L/usr/<BR/>  lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../../../<BR/>  x86_64-alpine-linux-musl/lib/../lib -L/<BR/>  usr/lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../../../lib -L/lib/../lib<BR/>  -L/usr/lib/../lib -L/usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../x86_64-alpine-linux-musl/lib -L/<BR/>  usr/lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../.. -L/lib -L/usr/lib<BR/>  /tmp/cccbFgpg.o -lssp_nonshared -lgcc<BR/>  --push-state --as-needed -lgcc_s<BR/>  --pop-state -lc -lgcc --push-state<BR/>  --as-needed -lgcc_s --pop-state /usr/<BR/>  lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/crtendS.o /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../lib/crtn.o</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623033 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623068 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#faf5ca" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/hostname</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623068 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 81%</FONT></TD></TR></TABLE>>];
+  p2623034 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cee6ce" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>ld</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /usr/lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../../../<BR/>  x86_64-alpine-linux-musl/bin/ld<BR/>  -plugin /usr/libexec/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/<BR/>  liblto_plugin.so -plugin-opt=/usr/<BR/>  libexec/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/lto-wrapper<BR/>  -plugin-opt=-fresolution=/tmp/<BR/>  ccfmGlJh.res<BR/>  -plugin-opt=-pass-through=-lgcc<BR/>  -plugin-opt=-pass-through=-lgcc_s<BR/>  -plugin-opt=-pass-through=-lc<BR/>  -plugin-opt=-pass-through=-lgcc<BR/>  -plugin-opt=-pass-through=-lgcc_s<BR/>  --build-id --eh-frame-hdr<BR/>  --hash-style=gnu -m elf_x86_64<BR/>  --as-needed -dynamic-linker<BR/>  /lib/ld-musl-x86_64.so.1 -pie -z now<BR/>  -o /tmp/hello /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../lib/Scrt1.o /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../lib/crti.o /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/<BR/>  crtbeginS.o -L/usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0 -L/usr/<BR/>  lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../../../<BR/>  x86_64-alpine-linux-musl/lib/../lib -L/<BR/>  usr/lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../../../lib -L/lib/../lib<BR/>  -L/usr/lib/../lib -L/usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../x86_64-alpine-linux-musl/lib -L/<BR/>  usr/lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/../../.. -L/lib -L/usr/lib<BR/>  /tmp/cccbFgpg.o -lssp_nonshared -lgcc<BR/>  --push-state --as-needed -lgcc_s<BR/>  --pop-state -lc -lgcc --push-state<BR/>  --as-needed -lgcc_s --pop-state /usr/<BR/>  lib/gcc/x86_64-alpine-linux-musl/<BR/>  15.2.0/crtendS.o /usr/lib/gcc/<BR/>  x86_64-alpine-linux-musl/15.2.0/../../<BR/>  ../../lib/crtn.o</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623034 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 81%</FONT></TD></TR></TABLE>>];
+  p2622888 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2622888 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2622993; p2622888; p2623025; p2623061 }
+
+  // File nodes (data flow mediators)
+  f11269687129093904013 [shape=ellipse, label="/tmp/ccMbEAOh.cdtor.o", fillcolor="#ef9a9a", style=filled, color="#666666"];
+  f659052551203093358 [shape=ellipse, label="/tmp/ccJejjNh.cdtor.c", fillcolor="#ef9a9a", style=filled, color="#666666"];
+  f15843702054583806464 [shape=ellipse, label="/tmp/cccbFgpg.o", fillcolor="#ef9a9a", style=filled, color="#666666"];
+  f12354220818635128665 [shape=ellipse, label="/tmp/hello.c", fillcolor="#e3f2fd", style=filled, color="#666666"];
+  f6085983275872315370 [shape=ellipse, label="/tmp/ccfmGlJh.res", fillcolor="#ef9a9a", style=filled, color="#666666"];
+  f15844285052198265619 [shape=ellipse, label="/tmp/output.txt", fillcolor="#e3f2fd", style=filled, color="#666666"];
+  f8243775794895755016 [shape=ellipse, label="/tmp/hello", fillcolor="#ffe0b2", style=filled, color="#666666"];
+  f15843702276645784386 [shape=ellipse, label="/tmp/cchiEMac.s", fillcolor="#ef9a9a", style=filled, color="#666666"];
+
+  // Network endpoints
+
+  // Fork/spawn edges
+  p2622993 -> p2622999 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623025 -> p2623031 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623025 -> p2623032 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623025 -> p2623033 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623033 -> p2623034 [label="fork", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2623031 -> p2623032 [label="file", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2623025 -> p2623032 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2622993 -> p2623031 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623032 -> p2623034 [label="file", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2623025 -> p2623034 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623061 -> p2623067 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623067 -> p2623068 [label="fork", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2623034 -> p2623067 [label="file", color="#cc3131", fontcolor="#cc3131", style=dashed, penwidth=1.0];
+  p2623067 -> p2623061 [label="file", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  p2623033 -> f11269687129093904013 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  p2623033 -> f11269687129093904013 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  p2623033 -> f659052551203093358 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  p2623033 -> f659052551203093358 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  p2623025 -> f15843702054583806464 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  p2623032 -> f15843702054583806464 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f15843702054583806464 -> p2623034 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623025 -> f15843702054583806464 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  p2622993 -> f12354220818635128665 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f12354220818635128665 -> p2623031 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623025 -> f6085983275872315370 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  p2623025 -> f6085983275872315370 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  p2623067 -> f15844285052198265619 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f15844285052198265619 -> p2623061 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623034 -> f8243775794895755016 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f8243775794895755016 -> p2623067 [label="exec", color="#e65100", fontcolor="#e65100", penwidth=2.0, style=bold];
+  p2623034 -> f8243775794895755016 [label="chmod", color="#6a1b9a", fontcolor="#6a1b9a"];
+  p2623025 -> f15843702276645784386 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  p2623031 -> f15843702276645784386 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f15843702276645784386 -> p2623032 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623025 -> f15843702276645784386 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  // Network edges
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: write /tmp/hello.c</TD></TR><TR><TD BGCOLOR="#c8e6c9">Action #2: gcc -o /tmp/hello /tmp/hello.c</TD></TR><TR><TD BGCOLOR="#fff9c4">Action #3: /tmp/hello</TD></TR></TABLE>>];
+  }
+}

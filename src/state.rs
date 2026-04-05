@@ -22,9 +22,13 @@ pub struct ProcessInfo {
     /// See MORSE (Hossain, Sheikhi, Sekar; S&P 2020) for the tag attenuation concept.
     pub taint_score: f64,
     pub taint_source: String,
-    pub is_original: bool,
     pub exited: bool,
     pub children: Vec<u32>,
+    /// Which action this process's events should be attributed to.
+    /// Set to current_action_id when first seen. Updated when the process
+    /// receives cross-action taint (IPC/file/network from a process in a
+    /// different action), re-attributing subsequent events to the tainting action.
+    pub attributed_action: u64,
 }
 
 impl ProcessInfo {
@@ -52,16 +56,6 @@ impl ProcessTable {
             }
     }
 
-    #[allow(dead_code)]
-    pub fn remove(&mut self, pid: u32) {
-        if let Some(info) = self.processes.remove(&pid) {
-            // Remove from parent's children list
-            if let Some(parent) = self.processes.get_mut(&info.ppid) {
-                parent.children.retain(|&c| c != pid);
-            }
-        }
-    }
-
     /// Set the taint score for a process. Only updates if the new score is higher.
     pub fn mark_tainted(&mut self, pid: u32, score: f64, source: &str) {
         if let Some(info) = self.processes.get_mut(&pid)
@@ -84,12 +78,6 @@ impl ProcessTable {
             .unwrap_or(0.0)
     }
 
-    #[allow(dead_code)]
-    pub fn is_tainted(&self, pid: u32) -> bool {
-        self.processes
-            .get(&pid)
-            .is_some_and(|p| p.is_tainted())
-    }
 }
 
 /// A directed edge in the taint graph representing inter-process communication.
@@ -105,21 +93,13 @@ pub struct TaintEdge {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum ChannelType {
     Fork,
-    UnixSocket,
-    Inet,
     Pipe,
-    Signal,
-    /// Shared memory (shmget/shmat/shmdt or mmap MAP_SHARED)
-    SharedMemory,
-    /// ptrace attachment (process debugging/injection)
-    Ptrace,
-    /// memfd_create (anonymous file-backed memory, often used for fileless exec)
-    Memfd,
     /// File-mediated data flow (process A writes file, process B reads it)
     FileFlow,
+    /// IPC message queue (SysV or POSIX): process A sends, process B receives
+    MessageQueue,
 }
 
 impl ChannelType {
@@ -130,13 +110,8 @@ impl ChannelType {
         match self {
             ChannelType::Fork => 0.9,         // children strongly inherit parent taint
             ChannelType::Pipe => 0.7,          // data flow, moderate inheritance
-            ChannelType::UnixSocket => 0.7,    // data flow, moderate inheritance
-            ChannelType::Inet => 0.8,          // significant data flow
-            ChannelType::Signal => 0.3,        // weak influence (kill/tgkill)
-            ChannelType::SharedMemory => 0.8,  // direct memory sharing, strong coupling
-            ChannelType::Ptrace => 0.95,       // near-total control over target
-            ChannelType::Memfd => 0.7,         // anonymous file-backed memory
             ChannelType::FileFlow => 0.5,      // indirect: writer → file → reader
+            ChannelType::MessageQueue => 0.7,  // direct data channel, same as pipe
         }
     }
 }
@@ -145,14 +120,9 @@ impl std::fmt::Display for ChannelType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChannelType::Fork => write!(f, "fork"),
-            ChannelType::UnixSocket => write!(f, "unix_socket"),
-            ChannelType::Inet => write!(f, "inet"),
             ChannelType::Pipe => write!(f, "pipe"),
-            ChannelType::Signal => write!(f, "signal"),
-            ChannelType::SharedMemory => write!(f, "shm"),
-            ChannelType::Ptrace => write!(f, "ptrace"),
-            ChannelType::Memfd => write!(f, "memfd"),
             ChannelType::FileFlow => write!(f, "file"),
+            ChannelType::MessageQueue => write!(f, "mqueue"),
         }
     }
 }
@@ -248,22 +218,11 @@ impl TaintGraph {
         newly_tainted
     }
 
-    /// Return edges first seen after `since` timestamp.
-    #[allow(dead_code)]
-    pub fn edges_since(&self, since: u64) -> Vec<&TaintEdge> {
-        self.edges
-            .iter()
-            .filter(|e| e.first_seen > since)
-            .collect()
-    }
 }
 
 /// Known-good state of a container at startup.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct ContainerBaseline {
-    pub original_processes: HashMap<u32, String>, // pid -> exec_path
-    pub original_binaries: HashSet<String>,
     pub sensitive_paths: HashSet<String>,
 }
 
@@ -283,14 +242,11 @@ impl ContainerBaseline {
             sensitive_paths.insert(p.to_string());
         }
         Self {
-            original_processes: HashMap::new(),
-            original_binaries: HashSet::new(),
             sensitive_paths,
         }
     }
 
     /// Check if a path matches any sensitive path pattern.
-    #[allow(dead_code)]
     pub fn is_sensitive(&self, path: &str) -> bool {
         for sp in &self.sensitive_paths {
             if sp.contains('*') {
@@ -306,17 +262,11 @@ impl ContainerBaseline {
         }
         false
     }
-
-    pub fn is_new_binary(&self, path: &str) -> bool {
-        !path.is_empty() && !self.original_binaries.contains(path)
-    }
 }
 
 /// A tracked file in the container's filesystem.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FileNode {
-    pub path: String,
     /// PIDs that wrote/created this file, with the action_id when it happened
     pub writers: Vec<(u32, u64)>,
     /// PIDs that read this file
@@ -330,9 +280,8 @@ pub struct FileNode {
 }
 
 impl FileNode {
-    pub fn new(path: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            path,
             writers: Vec::new(),
             readers: Vec::new(),
             executors: Vec::new(),
@@ -342,24 +291,39 @@ impl FileNode {
     }
 }
 
+/// A tracked IPC channel (SysV or POSIX message queue).
+/// Analogous to FileNode: tracks which PIDs send/receive through the channel
+/// so we can build taint edges between them.
+#[derive(Debug, Clone)]
+pub struct IpcNode {
+    /// PIDs that sent data through this channel, with the action_id
+    pub senders: Vec<(u32, u64)>,
+    /// PIDs that received data from this channel
+    pub receivers: Vec<(u32, u64)>,
+}
+
+impl IpcNode {
+    pub fn new() -> Self {
+        Self {
+            senders: Vec::new(),
+            receivers: Vec::new(),
+        }
+    }
+}
+
 /// What an open file descriptor points to.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum FdTarget {
     /// A file path (from openat/open/creat).
     File(String),
     /// A network endpoint (from connect/bind/accept).
     Network(String),
-    /// A socket with unknown endpoint (from socket()).
-    Socket { domain: u64 },
-    /// A pipe endpoint (from pipe/pipe2).
-    Pipe { inode: u64 },
+    /// A POSIX message queue name (from mq_open).
+    Ipc(String),
 }
 
 /// Per-container state.
-#[allow(dead_code)]
 pub struct ContainerState {
-    pub container_id: String,
     pub process_table: ProcessTable,
     pub taint_graph: TaintGraph,
     pub baseline: ContainerBaseline,
@@ -368,32 +332,132 @@ pub struct ContainerState {
     pub completed_actions: Vec<ActionLog>,
     /// Timestamp of the last receipt generation.
     pub last_receipt_time: u64,
-    /// Set of remote addresses seen across all actions in this container.
-    pub seen_remote_addrs: HashSet<String>,
     /// Tracked files keyed by path. Captures who read/wrote/exec'd each file.
     pub file_nodes: HashMap<String, FileNode>,
     /// Current action ID (for attributing file access to actions)
     pub current_action_id: u64,
     /// Per-process fd table: (pid, fd_number) → what it points to.
-    /// Populated by openat/connect/socket/pipe, consumed by sendfile/splice.
+    /// Populated by openat/connect/socket/pipe/mq_open, consumed by sendfile/splice/mq_send/recv.
     pub fd_table: HashMap<(u32, u64), FdTarget>,
+    /// Tracked IPC channels keyed by channel ID.
+    /// SysV message queues: "sysv_mq:<msqid>", POSIX: "posix_mq:<name>"
+    pub ipc_nodes: HashMap<String, IpcNode>,
 }
 
 impl ContainerState {
-    pub fn new(container_id: String, baseline: ContainerBaseline) -> Self {
+    pub fn new(_container_id: String, baseline: ContainerBaseline) -> Self {
         let global_action = ActionLog::new(0, "(container lifecycle)".to_string(), 0);
         Self {
-            container_id,
             process_table: ProcessTable::default(),
             taint_graph: TaintGraph::default(),
             baseline,
             current_action: Some(global_action),
             completed_actions: Vec::new(),
             last_receipt_time: 0,
-            seen_remote_addrs: HashSet::new(),
             file_nodes: HashMap::new(),
             current_action_id: 0,
             fd_table: HashMap::new(),
+            ipc_nodes: HashMap::new(),
+        }
+    }
+
+    /// Determine which action was active at a given wall-clock timestamp (ms).
+    /// Checks completed actions (by wall_start_ms..wall_end_ms) then falls back
+    /// to current_action_id.
+    pub fn action_at_time(&self, timestamp_ms: u64) -> u64 {
+        if timestamp_ms == 0 {
+            return self.current_action_id;
+        }
+
+        // First: exact match (timestamp falls within an action's wall-clock window)
+        for action in self.completed_actions.iter().rev() {
+            if let Some(end) = action.wall_end_ms {
+                if timestamp_ms >= action.wall_start_ms && timestamp_ms <= end {
+                    return action.action_id;
+                }
+            }
+        }
+        if let Some(ref action) = self.current_action {
+            if timestamp_ms >= action.wall_start_ms {
+                return action.action_id;
+            }
+        }
+
+        // Second: nearest-action match. The audit timestamp can precede the
+        // action_start wall-clock time (docker exec races ahead of the HTTP
+        // response). Find the action whose start is closest to the timestamp,
+        // but only if the gap is reasonable (< 2s) and doesn't cross into
+        // a previous action's window.
+        let mut best_id = self.current_action_id;
+        let mut best_gap = u64::MAX;
+
+        for (i, action) in self.completed_actions.iter().enumerate() {
+            if timestamp_ms < action.wall_start_ms {
+                let gap = action.wall_start_ms - timestamp_ms;
+                // Don't cross into the previous action's end time
+                let prev_end = if i > 0 {
+                    self.completed_actions[i - 1].wall_end_ms.unwrap_or(0)
+                } else {
+                    0
+                };
+                if gap < best_gap && gap < 2000 && timestamp_ms > prev_end {
+                    best_gap = gap;
+                    best_id = action.action_id;
+                }
+            }
+        }
+        if let Some(ref action) = self.current_action {
+            if timestamp_ms < action.wall_start_ms {
+                let gap = action.wall_start_ms - timestamp_ms;
+                let prev_end = self.completed_actions.last()
+                    .and_then(|a| a.wall_end_ms).unwrap_or(0);
+                if gap < best_gap && gap < 2000 && timestamp_ms > prev_end {
+                    best_id = action.action_id;
+                }
+            }
+        }
+
+        best_id
+    }
+
+    /// Find the ActionLog a process's events should be attributed to.
+    fn action_for(&mut self, action_id: u64) -> Option<&mut ActionLog> {
+        if let Some(ref mut action) = self.current_action {
+            if action.action_id == action_id {
+                return self.current_action.as_mut();
+            }
+        }
+        self.completed_actions.iter_mut().find(|a| a.action_id == action_id)
+            .or(self.current_action.as_mut())
+    }
+
+    /// Route a process event to the correct ActionLog based on process attribution.
+    pub fn record_process_event(&mut self, pid: u32, event: crate::events::ProcessEvent) {
+        let attr = self.process_table.get(&pid)
+            .map(|p| p.attributed_action)
+            .unwrap_or(self.current_action_id);
+        if let Some(action) = self.action_for(attr) {
+            action.record_process_event(event);
+        }
+    }
+
+    /// Route a file event to the correct ActionLog based on process attribution.
+    pub fn record_file_event(&mut self, pid: u32, event: crate::events::FileEvent) {
+        let attr = self.process_table.get(&pid)
+            .map(|p| p.attributed_action)
+            .unwrap_or(self.current_action_id);
+        if let Some(action) = self.action_for(attr) {
+            action.record_file_event(event);
+        }
+    }
+
+    /// Route a network event to the correct ActionLog based on process attribution.
+    pub fn record_net_event(&mut self, pid: u32, event: crate::events::NetworkEvent) {
+        let attr = self.process_table.get(&pid)
+            .map(|p| p.attributed_action)
+            .unwrap_or(self.current_action_id);
+        if let Some(action) = self.action_for(attr) {
+            action.record_net_event(event);
         }
     }
 
@@ -402,14 +466,18 @@ impl ContainerState {
         if path.is_empty() {
             return;
         }
-        let action_id = self.current_action_id;
+        // Canonicalize path: collapse /./, //, strip leading ./
+        let path = &canonicalize_path(path);
+        let action_id = self.process_table.get(&pid)
+            .map(|p| p.attributed_action)
+            .unwrap_or(self.current_action_id);
         let node = self
             .file_nodes
             .entry(path.to_string())
-            .or_insert_with(|| FileNode::new(path.to_string()));
+            .or_insert_with(|| FileNode::new());
         let entry = (pid, action_id);
         match op {
-            crate::events::FileOp::Write | crate::events::FileOp::OpenWrite | crate::events::FileOp::Create => {
+            crate::events::FileOp::Write | crate::events::FileOp::OpenWrite => {
                 if !node.writers.contains(&entry) {
                     node.writers.push(entry);
                 }
@@ -435,6 +503,70 @@ impl ContainerState {
             crate::events::FileOp::Chmod | crate::events::FileOp::Chown | crate::events::FileOp::Rename => {
                 if !node.modifiers.contains(&entry) {
                     node.modifiers.push(entry);
+                }
+            }
+        }
+    }
+
+    /// Record an IPC access (send or receive) on a named channel.
+    pub fn record_ipc_send(&mut self, channel: &str, pid: u32) {
+        if channel.is_empty() {
+            return;
+        }
+        let action_id = self.process_table.get(&pid)
+            .map(|p| p.attributed_action)
+            .unwrap_or(self.current_action_id);
+        let node = self
+            .ipc_nodes
+            .entry(channel.to_string())
+            .or_insert_with(IpcNode::new);
+        let entry = (pid, action_id);
+        if !node.senders.contains(&entry) {
+            node.senders.push(entry);
+        }
+    }
+
+    pub fn record_ipc_recv(&mut self, channel: &str, pid: u32) {
+        if channel.is_empty() {
+            return;
+        }
+        let action_id = self.process_table.get(&pid)
+            .map(|p| p.attributed_action)
+            .unwrap_or(self.current_action_id);
+        let node = self
+            .ipc_nodes
+            .entry(channel.to_string())
+            .or_insert_with(IpcNode::new);
+        let entry = (pid, action_id);
+        if !node.receivers.contains(&entry) {
+            node.receivers.push(entry);
+        }
+    }
+
+    /// Create MessageQueue taint edges from ipc_nodes: if process A sent data
+    /// and process B received it through the same channel, add a MessageQueue edge A→B.
+    pub fn build_ipc_flow_edges(&mut self) {
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+
+        for (channel, node) in &self.ipc_nodes {
+            if node.senders.is_empty() || node.receivers.is_empty() {
+                continue;
+            }
+
+            let sender_pids: HashSet<u32> = node.senders.iter().map(|(p, _)| *p).collect();
+            let receiver_pids: HashSet<u32> = node.receivers.iter().map(|(p, _)| *p).collect();
+
+            for &sender in &sender_pids {
+                for &receiver in &receiver_pids {
+                    if sender != receiver && seen.insert((sender, receiver)) {
+                        self.taint_graph.add_edge(
+                            sender,
+                            receiver,
+                            format!("ipc:{}", channel),
+                            ChannelType::MessageQueue,
+                            0,
+                        );
+                    }
                 }
             }
         }
@@ -492,32 +624,68 @@ impl ContainerState {
     }
 }
 
+/// An experiment groups multiple containers for aggregated receipts.
+/// In eval frameworks, an experiment is one agent run that may span
+/// multiple containers (agent workspace, target services, etc.).
+#[derive(Debug, Clone, Serialize)]
+pub struct Experiment {
+    pub id: String,
+    pub name: String,
+    /// Container IDs belonging to this experiment.
+    pub container_ids: Vec<String>,
+}
+
 /// Top-level daemon state holding all container states.
 pub struct DaemonState {
     /// Container states keyed by container ID (short 12-char hex).
     pub containers: HashMap<String, ContainerState>,
-    /// Cache: PID -> container ID for fast dispatch.
-    pub pid_cache: HashMap<u32, Option<String>>,
+    /// IP → container_id mapping for cross-container network flow resolution.
+    /// Populated from /proc/{pid}/net/fib_trie when a container is first seen.
+    /// If multiple containers share an IP (Docker Compose network_mode: service:x),
+    /// the first one seen wins. The experiment receipt shows all containers regardless.
+    pub ip_to_container: HashMap<std::net::Ipv4Addr, String>,
+    /// Experiments keyed by experiment ID.
+    pub experiments: HashMap<String, Experiment>,
+    /// Reverse map: container_id → experiment_id.
+    pub container_to_experiment: HashMap<String, String>,
+    /// Auto-increment for experiment IDs.
+    next_experiment_id: u64,
 }
 
 impl DaemonState {
     pub fn new() -> Self {
         Self {
             containers: HashMap::new(),
-            pid_cache: HashMap::new(),
+            ip_to_container: HashMap::new(),
+            experiments: HashMap::new(),
+            container_to_experiment: HashMap::new(),
+            next_experiment_id: 1,
         }
     }
 
-    /// Look up or discover which container a PID belongs to.
-    /// Returns None if the PID is not in any known container.
-    #[allow(dead_code)]
-    pub fn container_for_pid(&mut self, pid: u32) -> Option<String> {
-        if let Some(cached) = self.pid_cache.get(&pid) {
-            return cached.clone();
+    /// Create a new experiment, returns its ID.
+    pub fn create_experiment(&mut self, name: String) -> String {
+        let id = format!("exp-{}", self.next_experiment_id);
+        self.next_experiment_id += 1;
+        self.experiments.insert(id.clone(), Experiment {
+            id: id.clone(),
+            name,
+            container_ids: Vec::new(),
+        });
+        id
+    }
+
+    /// Add a container to an experiment.
+    pub fn add_container_to_experiment(&mut self, experiment_id: &str, container_id: &str) -> bool {
+        if let Some(exp) = self.experiments.get_mut(experiment_id) {
+            if !exp.container_ids.contains(&container_id.to_string()) {
+                exp.container_ids.push(container_id.to_string());
+            }
+            self.container_to_experiment.insert(container_id.to_string(), experiment_id.to_string());
+            true
+        } else {
+            false
         }
-        let result = crate::docker::container_from_pid(pid).map(|c| c.id);
-        self.pid_cache.insert(pid, result.clone());
-        result
     }
 
     /// Get or create a ContainerState for the given container ID.
@@ -531,4 +699,22 @@ impl DaemonState {
         }
         self.containers.get_mut(container_id).unwrap()
     }
+}
+
+/// Canonicalize a file path: collapse `/./ → /`, `// → /`, strip leading `./`.
+/// Pure string manipulation — no I/O.
+fn canonicalize_path(path: &str) -> String {
+    let mut result = path.replace("/./", "/").replace("//", "/");
+    if result.starts_with("./") {
+        result = result[2..].to_string();
+    }
+    // Collapse simple parent refs: /a/b/../c → /a/c
+    while let Some(pos) = result.find("/../") {
+        if pos == 0 {
+            break; // can't go above root
+        }
+        let parent_start = result[..pos].rfind('/').unwrap_or(0);
+        result = format!("{}{}", &result[..parent_start], &result[pos + 3..]);
+    }
+    result
 }

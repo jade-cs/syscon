@@ -1,0 +1,29 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 102B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:latest
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/2] FROM docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+#4 resolve docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 0.0s done
+#4 DONE 0.0s
+
+#5 [2/2] RUN apk add --no-cache python3 curl coreutils
+#5 CACHED
+
+#6 exporting to image
+#6 exporting layers done
+#6 exporting manifest sha256:e15f5ef8940f658f66362521d7959b853d7caca6dcba82f5e5119023f45af8d3 done
+#6 exporting config sha256:834719ea7cdac2334317020148293b80ae151cd27297fa49e577e2a82180db42 done
+#6 exporting attestation manifest sha256:13008f23357d917b5c3fee2eff838fe43fe481ab5acaaea49de75189b135c1a9 0.0s done
+#6 exporting manifest list sha256:7eaa073863b884f4776705efb6dc642c9a3e9debeee1aa0648ce8dc228d5f1cb 0.0s done
+#6 naming to docker.io/library/syscon-test-scenario-06-data-chain:latest done
+#6 unpacking to docker.io/library/syscon-test-scenario-06-data-chain:latest 0.0s done
+#6 DONE 0.2s

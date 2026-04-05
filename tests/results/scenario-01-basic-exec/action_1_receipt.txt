@@ -1,0 +1,16 @@
+=== Post-Action Receipt: Action #1 ===
+Command: ls && cat /etc/hostname && whoami
+Duration: 2.2s | 14 syscall events
+
+PROCESSES: 3 unique, 0 forked, 0 exited
+  [whoami:2621876] $ whoami (x2)
+  [ls:2621883] $ ls /
+  [cat:2621884] $ cat /etc/hostname
+
+DATA FLOWS:
+  whoami:2621876 -> cat:2621884 (fork)
+  whoami:2621876 -> ls:2621883 (fork)
+  cat:2621884 reads /etc/hostname
+  whoami:2621876 reads /etc/passwd
+
+

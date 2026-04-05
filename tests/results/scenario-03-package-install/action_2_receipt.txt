@@ -1,0 +1,12 @@
+=== Post-Action Receipt: Action #2 ===
+Command: python3 -c "print(42)" && git --version
+Duration: 2.3s | 21 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [git:2622636] $ git --version (x2)
+  [python3:2622642] $ python3 -c print(42)
+
+DATA FLOWS:
+  git:2622636 -> python3:2622642 (fork)
+
+

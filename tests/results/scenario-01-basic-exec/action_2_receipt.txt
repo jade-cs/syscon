@@ -1,0 +1,12 @@
+=== Post-Action Receipt: Action #2 ===
+Command: echo hello > /tmp/test.txt && cat /tmp/test.txt
+Duration: 2.2s | 8 syscall events
+
+PROCESSES: 1 unique, 0 forked, 0 exited
+  [cat:2621912] $ cat /tmp/test.txt (x2)
+
+DATA FLOWS:
+  cat:2621912 reads /tmp/test.txt
+  cat:2621912 writes /tmp/test.txt
+
+

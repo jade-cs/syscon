@@ -1,0 +1,4 @@
+POSIX message queue and socketpair covert channels: exercises mq_open,
+mq_send, mq_receive for data transfer, and socketpair + sendmsg/recvmsg
+for a parent-child IPC channel. Both bypass normal file and pipe tracking.
+Tests that syscon detects IPC taint flow through these channels.

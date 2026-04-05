@@ -1,0 +1,16 @@
+=== Post-Action Receipt: Action #2 ===
+Command: python3 /tmp/stage.py
+Duration: 3.3s | 75 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [python3:2623877] $ python3 /tmp/stage.py
+  [hostname:2623883] $ hostname (x2)
+
+DATA FLOWS:
+  chmod:2623844 (action #1) wrote /tmp/stage.py -> python3:2623877 reads
+  python3:2623877 -> hostname:2623883 (fork)
+  python3:2623877 reads /etc/passwd, /tmp, /tmp/staged.txt
+  python3:2623877 writes /tmp/staged.txt
+  cat:2623918 [pre-existing] influenced by python3:2623877 via file
+
+

@@ -1,0 +1,19 @@
+=== Post-Action Receipt: Action #3 ===
+Command: /tmp/hello
+Duration: 2.2s | 17 syscall events
+
+PROCESSES: 3 unique, 0 forked, 0 exited
+  [cat:2623061] $ cat /tmp/output.txt (x2)
+  [hello:2623067]
+  [cat:2623068] $ cat /etc/hostname (x2)
+
+DATA FLOWS:
+  cat:2623061 -> hello:2623067 (fork)
+  hello:2623067 -> cat:2623068 (fork)
+  ld:2623034 (action #2) wrote /tmp/hello -> hello:2623067 reads
+  cat:2623068 reads /etc/hostname
+  cat:2623061 reads /tmp/output.txt
+  hello:2623067 reads /tmp/output.txt
+  hello:2623067 writes /tmp/output.txt
+
+

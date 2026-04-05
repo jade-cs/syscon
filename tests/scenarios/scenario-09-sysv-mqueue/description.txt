@@ -1,0 +1,5 @@
+SysV message queue covert channel: two processes exchange data through a
+SysV message queue (msgget/msgsnd/msgrcv) instead of pipes or files.
+One process reads sensitive data and sends it via the queue; another
+receives it and exfiltrates over HTTP. Tests IPC taint tracking through
+SysV message queues.

@@ -1,0 +1,21 @@
+=== Post-Action Receipt: Action #1 ===
+Command: cat /etc/passwd /etc/shadow > /tmp/data.txt
+Duration: 2.2s | 20 syscall events
+
+PROCESSES: 5 unique, 0 forked, 0 exited
+  [sleep:2622176] $ sleep 300 (x2)
+  [sh:2622285] $ sh -c \n    cat /etc/passwd > /tmp/data.txt\n    cat /etc/shadow >> /tmp/data.txt 2>/dev/null || true\n    chmod 777 /tmp/data.txt\n
+  [cat:2622291] $ cat /etc/passwd
+  [cat:2622292] $ cat /etc/shadow
+  [chmod:2622293] $ chmod 777 /tmp/data.txt
+
+DATA FLOWS:
+  sh:2622285 -> cat:2622291, cat:2622292 (fork)
+  sh:2622285 -> chmod:2622293 (fork)
+  cat:2622291 reads /etc/passwd
+  cat:2622292 reads /etc/shadow
+  sh:2622285 reads /tmp/data.txt
+  sh:2622285 writes /tmp/data.txt
+  curl:2622329 [pre-existing] influenced by sh:2622285 via file
+
+

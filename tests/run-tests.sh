@@ -2,23 +2,27 @@
 # Run all Docker-based syscon test scenarios.
 #
 # Prerequisites:
-#   - syscon daemon running: sudo ./target/release/syscon daemon --port 9903 --log-file /tmp/syscon-tests.binlog
-#   - seccomp profile generated: ./target/release/syscon gen-profile --block-dangerous -o syscon-seccomp.json
+#   - syscon daemon running: sudo ./target/debug/syscon daemon --port 9900
 #   - Docker available
 #
 # Usage:
 #   ./tests/run-tests.sh              # run all scenarios
 #   ./tests/run-tests.sh scenario-01  # run one scenario
+#   ./tests/run-tests.sh -q           # quiet mode (summary only)
 
 set -euo pipefail
+
+QUIET=false
+if [ "${1:-}" = "-q" ]; then
+    QUIET=true
+    shift
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SCENARIOS_DIR="$SCRIPT_DIR/scenarios"
-PORT="${SYSCON_PORT:-9903}"
+PORT="${SYSCON_PORT:-9900}"
 URL="http://localhost:$PORT"
-PROFILE="$PROJECT_DIR/syscon-seccomp.json"
-LOGFILE="${SYSCON_LOGFILE:-/tmp/syscon-tests.binlog}"
 RESULTS_DIR="$SCRIPT_DIR/results"
 
 PASS=0
@@ -38,14 +42,9 @@ cleanup_container() {
 }
 
 check_prereqs() {
-    if [ ! -f "$PROFILE" ]; then
-        echo -e "${RED}ERROR: seccomp profile not found at $PROFILE${NC}"
-        echo "Run: $PROJECT_DIR/target/release/syscon gen-profile --block-dangerous -o $PROFILE"
-        exit 1
-    fi
     if ! curl -sf "$URL/status" > /dev/null 2>&1; then
         echo -e "${RED}ERROR: syscon daemon not reachable at $URL${NC}"
-        echo "Start with: sudo $PROJECT_DIR/target/release/syscon daemon --port $PORT --log-file $LOGFILE"
+        echo "Start with: sudo $PROJECT_DIR/target/debug/syscon daemon --port $PORT"
         exit 1
     fi
     if ! command -v docker &>/dev/null; then
@@ -66,13 +65,11 @@ run_scenario() {
     name="$(basename "$dir")"
     local container_name="syscon-test-$name"
 
-    echo -e "${BOLD}=== Scenario: $name ===${NC}"
+    $QUIET || echo -e "${BOLD}=== Scenario: $name ===${NC}"
 
     # Read scenario metadata
-    local description=""
-    if [ -f "$dir/description.txt" ]; then
-        description="$(cat "$dir/description.txt")"
-        echo "  $description"
+    if [ -f "$dir/description.txt" ] && ! $QUIET; then
+        echo "  $(cat "$dir/description.txt")"
     fi
 
     cleanup_container "$container_name"
@@ -81,37 +78,36 @@ run_scenario() {
     # Build image if Dockerfile exists
     local image="alpine:latest"
     if [ -f "$dir/Dockerfile" ]; then
-        echo "  Building image..."
+        $QUIET || echo "  Building image..."
         if ! sudo docker build -t "syscon-test-$name" "$dir" > "$RESULTS_DIR/$name/build.log" 2>&1; then
-            echo -e "  ${RED}FAIL: docker build failed${NC}"
-            cat "$RESULTS_DIR/$name/build.log"
+            echo -e "  ${RED}FAIL: $name — docker build failed${NC}"
+            $QUIET || cat "$RESULTS_DIR/$name/build.log"
             FAIL=$((FAIL + 1))
             return
         fi
         image="syscon-test-$name"
     fi
 
-    # Launch container with seccomp profile
-    echo "  Launching container..."
+    # Launch container
+    $QUIET || echo "  Launching container..."
     local cid
     cid=$(sudo docker run -d --name "$container_name" \
-        --security-opt "seccomp=$PROFILE" \
         "$image" sh -c 'sleep 300')
     local short_cid="${cid:0:12}"
-    echo "  Container: $short_cid"
+    $QUIET || echo "  Container: $short_cid"
     sleep 1
 
     # Run actions
     if [ -f "$dir/actions.sh" ]; then
-        echo "  Running actions..."
+        $QUIET || echo "  Running actions..."
         if ! CONTAINER="$container_name" CID="$short_cid" URL="$URL" \
             bash "$dir/actions.sh" > "$RESULTS_DIR/$name/actions.log" 2>&1; then
-            echo -e "  ${YELLOW}WARN: actions.sh had errors (may be expected)${NC}"
+            $QUIET || echo -e "  ${YELLOW}WARN: actions.sh had errors (may be expected)${NC}"
         fi
     fi
 
     # Collect receipts
-    echo "  Collecting receipts..."
+    $QUIET || echo "  Collecting receipts..."
     local receipt_file="$RESULTS_DIR/$name/receipt.txt"
     curl -sf "$URL/containers/$short_cid/receipt" | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('receipt',''))" \
@@ -136,18 +132,22 @@ run_scenario() {
 
     # Verify
     if [ -f "$dir/verify.sh" ]; then
-        echo "  Verifying..."
+        $QUIET || echo "  Verifying..."
         if RECEIPT="$receipt_file" RESULTS="$RESULTS_DIR/$name" CID="$short_cid" URL="$URL" \
             bash "$dir/verify.sh" > "$RESULTS_DIR/$name/verify.log" 2>&1; then
-            echo -e "  ${GREEN}PASS${NC}"
+            if $QUIET; then
+                echo -e "${GREEN}PASS${NC}  $name"
+            else
+                echo -e "  ${GREEN}PASS${NC}"
+            fi
             PASS=$((PASS + 1))
         else
-            echo -e "  ${RED}FAIL${NC}"
+            echo -e "${RED}FAIL${NC}  $name"
             cat "$RESULTS_DIR/$name/verify.log"
             FAIL=$((FAIL + 1))
         fi
     else
-        echo -e "  ${YELLOW}SKIP (no verify.sh)${NC}"
+        echo -e "${YELLOW}SKIP${NC}  $name (no verify.sh)"
         SKIP=$((SKIP + 1))
     fi
 
@@ -183,19 +183,6 @@ fi
 echo ""
 echo -e "${BOLD}=== Results ===${NC}"
 echo -e "  ${GREEN}PASS: $PASS${NC}  ${RED}FAIL: $FAIL${NC}  ${YELLOW}SKIP: $SKIP${NC}"
-
-# Test binary log features if logfile exists
-if [ -f "$LOGFILE" ]; then
-    echo ""
-    echo -e "${BOLD}=== Binary Log Tests ===${NC}"
-    echo "  Replay..."
-    "$PROJECT_DIR/target/release/syscon" replay -i "$LOGFILE" -f receipt > "$RESULTS_DIR/replay.txt" 2>/dev/null
-    echo "  Replay produced $(wc -l < "$RESULTS_DIR/replay.txt") lines"
-
-    echo "  Reduce..."
-    "$PROJECT_DIR/target/release/syscon" reduce -i "$LOGFILE" > "$RESULTS_DIR/reduce.txt" 2>/dev/null
-    echo "  $(head -3 "$RESULTS_DIR/reduce.txt" | tail -1)"
-fi
 
 echo ""
 echo "Results saved to: $RESULTS_DIR/"

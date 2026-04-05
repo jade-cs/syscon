@@ -1,186 +1,99 @@
-use crate::audit::SeccompEvent;
-use crate::binlog::SyscallArgs;
 use crate::events::{FileEvent, FileOp, NetOp, NetworkEvent, ProcessEvent, ProcessOp};
+use crate::ingest::{SyscallDetail, SyscallEvent};
 use crate::state::{ChannelType, ContainerState, FdTarget, ProcessInfo};
 use crate::syscalls;
 
-/// Dispatch an audit event to the appropriate handler based on syscall number.
-/// `ppid` and `cmdline` are resolved outside the lock by the daemon's event processor.
-/// `args` contains resolved syscall arguments when using USER_NOTIF mode.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64, ppid: u32, cmdline: &str, open_files: &[String], net_connections: &[String], args: Option<&SyscallArgs>) {
-    ensure_process(container, event, ppid, cmdline, open_files, net_connections);
+/// Dispatch a syscall event to the appropriate handler.
+pub fn dispatch(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    ensure_process(container, ev);
 
-    let name = syscalls::name(event.syscall);
+    let name = syscalls::name(ev.syscall);
     match name {
         // Process lifecycle
-        "clone" | "clone3" | "fork" | "vfork" => {
-            handle_fork(container, event, timestamp);
-        }
-        "execve" | "execveat" => {
-            handle_exec(container, event, timestamp);
-        }
-        "exit_group" => {
-            handle_exit(container, event, timestamp);
-        }
+        "clone" | "clone3" | "fork" | "vfork" => handle_fork(container, ev, timestamp),
+        "execve" | "execveat" => handle_exec(container, ev, timestamp),
+        "exit_group" => handle_exit(container, ev, timestamp),
 
-        // File operations
-        "open" | "openat" | "openat2" => {
-            handle_open(container, event, timestamp, args);
-        }
+        // File operations -- resolved args come from SyscallDetail::File
+        "open" | "openat" | "openat2" | "creat" => handle_open(container, ev, timestamp),
         "read" | "pread64" | "readv" | "preadv" | "preadv2" => {
-            handle_file_rw(container, event, FileOp::Read, timestamp);
+            handle_file_rw(container, ev, FileOp::Read, timestamp);
         }
         "write" | "pwrite64" | "writev" | "pwritev" | "pwritev2" => {
-            handle_file_rw(container, event, FileOp::Write, timestamp);
+            handle_file_rw(container, ev, FileOp::Write, timestamp);
         }
-        "unlink" | "unlinkat" => {
-            handle_file_meta(container, event, FileOp::Unlink, timestamp, args);
-        }
-        "rename" | "renameat" | "renameat2" => {
-            handle_file_meta(container, event, FileOp::Rename, timestamp, args);
-        }
-        "chmod" | "fchmod" | "fchmodat" => {
-            handle_file_meta(container, event, FileOp::Chmod, timestamp, args);
-        }
-        "chown" | "fchown" | "fchownat" => {
-            handle_file_meta(container, event, FileOp::Chown, timestamp, args);
-        }
+        "unlink" | "unlinkat" => handle_file_meta(container, ev, FileOp::Unlink, timestamp),
+        "rename" | "renameat" | "renameat2" => handle_file_meta(container, ev, FileOp::Rename, timestamp),
+        "chmod" | "fchmod" | "fchmodat" => handle_file_meta(container, ev, FileOp::Chmod, timestamp),
+        "chown" | "fchown" | "fchownat" => handle_file_meta(container, ev, FileOp::Chown, timestamp),
 
         // Network
-        "socket" => {
-            handle_network(container, event, NetOp::Socket, timestamp, args);
-        }
-        "connect" => {
-            handle_network(container, event, NetOp::Connect, timestamp, args);
-        }
-        "bind" => {
-            handle_network(container, event, NetOp::Bind, timestamp, args);
-        }
-        "accept" | "accept4" => {
-            handle_network(container, event, NetOp::Accept, timestamp, args);
-        }
-        "sendto" => {
-            handle_network(container, event, NetOp::SendTo, timestamp, args);
-        }
-        "recvfrom" => {
-            handle_network(container, event, NetOp::RecvFrom, timestamp, args);
-        }
+        "socket" => handle_network(container, ev, NetOp::Socket, timestamp),
+        "connect" => handle_network(container, ev, NetOp::Connect, timestamp),
+        "bind" => handle_network(container, ev, NetOp::Bind, timestamp),
+        "accept" | "accept4" => handle_network(container, ev, NetOp::Accept, timestamp),
+        "sendto" => handle_network(container, ev, NetOp::SendTo, timestamp),
+        "sendmsg" => handle_network(container, ev, NetOp::SendTo, timestamp),
+        "recvfrom" => handle_network(container, ev, NetOp::RecvFrom, timestamp),
+        "recvmsg" => handle_network(container, ev, NetOp::RecvFrom, timestamp),
+        "sendmmsg" => handle_network(container, ev, NetOp::SendTo, timestamp),
+        "recvmmsg" => handle_network(container, ev, NetOp::RecvFrom, timestamp),
 
         // IPC
-        "pipe" | "pipe2" => {
-            handle_pipe(container, event, timestamp);
-        }
+        "pipe" | "pipe2" => {}
         "dup" | "dup2" | "dup3" => {}
-        "kill" | "tgkill" => {
-            handle_signal(container, event, timestamp);
-        }
+        "kill" | "tgkill" => handle_signal(container, ev, timestamp),
 
-        // close — just track for completeness
-        "close" => {}
+        // Shared memory / memfd / ptrace
+        "shmget" | "shmat" | "shmdt" => {}
+        // SysV message queues
+        "msgget" => handle_ipc_open(container, ev, timestamp),
+        "msgsnd" => handle_ipc_send(container, ev, timestamp),
+        "msgrcv" => handle_ipc_recv(container, ev, timestamp),
+        // POSIX message queues
+        "mq_open" => handle_mq_open(container, ev, timestamp),
+        "mq_timedsend" => handle_ipc_send(container, ev, timestamp),
+        "mq_timedreceive" => handle_ipc_recv(container, ev, timestamp),
+        "memfd_create" => handle_memfd(container, ev, timestamp),
+        "ptrace" => handle_ptrace(container, ev, timestamp),
 
-        // Shared memory
-        "shmget" | "shmat" | "shmdt" => {
-            handle_shm(container, event, timestamp);
-        }
-
-        // Anonymous memory-backed fd (fileless execution vector)
-        "memfd_create" => {
-            handle_memfd(container, event, timestamp);
-        }
-
-        // Process debugging/injection
-        "ptrace" => {
-            handle_ptrace(container, event, timestamp);
-        }
-
-        // Hidden data flow syscalls — kernel-space fd-to-fd transfers.
-        // These move data without touching userspace, making them invisible
-        // to traditional file monitoring. We log them as notable events.
-        "sendfile" => {
-            handle_kernel_transfer(container, event, "sendfile", timestamp, args);
-        }
-        "splice" => {
-            handle_kernel_transfer(container, event, "splice", timestamp, args);
-        }
-        "tee" => {
-            handle_kernel_transfer(container, event, "tee", timestamp, args);
-        }
-        "copy_file_range" => {
-            handle_kernel_transfer(container, event, "copy_file_range", timestamp, args);
+        // Kernel-space fd-to-fd transfers
+        "sendfile" | "splice" | "tee" | "copy_file_range" => {
+            handle_kernel_transfer(container, ev, name, timestamp);
         }
 
         _ => {}
     }
 }
 
-fn handle_shm(_container: &mut ContainerState, _event: &SeccompEvent, _timestamp: u64) {
-    // In LOG mode we can't see the shmid or key.
-    // In NOTIFY mode, we could track shared memory segments and create
-    // SharedMemory taint edges between processes sharing the same segment.
-    // For now, just note the syscall occurred.
-}
-
-fn handle_memfd(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64) {
-    // memfd_create is notable: it creates anonymous file-backed memory that
-    // can be used for fileless execution (write ELF to memfd, then execveat it).
+fn handle_memfd(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
     let proc_event = ProcessEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
-        operation: ProcessOp::Fork, // Reuse fork as "notable IPC" for now
+        operation: ProcessOp::Fork,
         target_pid: None,
-        exe: event.exe.clone(),
-        comm: event.comm.clone(),
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
     };
-    if let Some(action) = &mut container.current_action {
-        action.record_process_event(proc_event);
-    }
+    container.record_process_event(ev.pid, proc_event);
 }
 
 fn handle_kernel_transfer(
     container: &mut ContainerState,
-    event: &SeccompEvent,
+    ev: &SyscallEvent,
     syscall_name: &str,
     timestamp: u64,
-    args: Option<&SyscallArgs>,
 ) {
-    // These syscalls move data between file descriptors entirely in kernel space.
-    // Look up the source and dest fds to reconstruct the data flow.
-    //
-    // sendfile(out_fd, in_fd, offset, count): a0=out_fd, a1=in_fd
-    // splice(fd_in, off_in, fd_out, off_out, len, flags): a0=fd_in, a2=fd_out
-    // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags): a0=fd_in, a2=fd_out
-    // tee(fd_in, fd_out, len, flags): a0=fd_in, a1=fd_out
-
-    let (src_fd, dst_fd) = if let Some(a) = args {
-        match syscall_name {
-            "sendfile" => (Some(a.raw[1]), Some(a.raw[0])), // sendfile(out, in, ...) — note reversed!
-            "splice" | "copy_file_range" => (Some(a.raw[0]), Some(a.raw[2])),
-            "tee" => (Some(a.raw[0]), Some(a.raw[1])),
-            _ => (None, None),
-        }
-    } else {
-        (None, None)
+    let (src_fd, dst_fd) = match &ev.detail {
+        SyscallDetail::Transfer { src_fd, dst_fd } => (Some(*src_fd), Some(*dst_fd)),
+        _ => (None, None),
     };
 
-    // Resolve fd numbers to paths/addresses via our fd table
-    let src_target = src_fd.and_then(|fd| container.fd_table.get(&(event.pid, fd)).cloned());
-    let dst_target = dst_fd.and_then(|fd| container.fd_table.get(&(event.pid, fd)).cloned());
+    let src_target = src_fd.and_then(|fd| container.fd_table.get(&(ev.pid, fd)).cloned());
+    let dst_target = dst_fd.and_then(|fd| container.fd_table.get(&(ev.pid, fd)).cloned());
 
-    let src_desc = match &src_target {
-        Some(FdTarget::File(p)) => p.clone(),
-        Some(FdTarget::Network(a)) => format!("net:{a}"),
-        Some(FdTarget::Socket { domain }) => format!("socket(AF_{domain})"),
-        Some(FdTarget::Pipe { inode }) => format!("pipe:[{inode}]"),
-        None => src_fd.map(|fd| format!("fd:{fd}")).unwrap_or_default(),
-    };
-    let dst_desc = match &dst_target {
-        Some(FdTarget::File(p)) => p.clone(),
-        Some(FdTarget::Network(a)) => format!("net:{a}"),
-        Some(FdTarget::Socket { domain }) => format!("socket(AF_{domain})"),
-        Some(FdTarget::Pipe { inode }) => format!("pipe:[{inode}]"),
-        None => dst_fd.map(|fd| format!("fd:{fd}")).unwrap_or_default(),
-    };
+    let src_desc = fd_target_desc(&src_target, src_fd);
+    let dst_desc = fd_target_desc(&dst_target, dst_fd);
 
     let path = if !src_desc.is_empty() && !dst_desc.is_empty() {
         format!("(kernel:{syscall_name} {src_desc} → {dst_desc})")
@@ -188,13 +101,12 @@ fn handle_kernel_transfer(
         format!("(kernel:{syscall_name})")
     };
 
-    // If source is a file, record it as a read so it shows in data flows
     if let Some(FdTarget::File(ref src_path)) = src_target {
-        container.record_file_access(src_path, event.pid, FileOp::Read);
+        container.record_file_access(src_path, ev.pid, FileOp::Read);
     }
 
     let file_event = FileEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: FileOp::Read,
         path,
@@ -202,145 +114,129 @@ fn handle_kernel_transfer(
         is_sensitive: false,
         is_new_binary: false,
     };
-    if let Some(action) = &mut container.current_action {
-        action.record_file_event(file_event);
+    container.record_file_event(ev.pid, file_event);
+}
+
+fn fd_target_desc(target: &Option<FdTarget>, fd: Option<u64>) -> String {
+    match target {
+        Some(FdTarget::File(p)) => p.clone(),
+        Some(FdTarget::Network(a)) => format!("net:{a}"),
+        Some(FdTarget::Ipc(name)) => format!("mq:{name}"),
+        None => fd.map(|fd| format!("fd:{fd}")).unwrap_or_default(),
     }
 }
 
-fn handle_ptrace(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64) {
-    // ptrace is a powerful IPC channel: the tracer has near-total control
-    // over the tracee. Create a strong taint edge if we know the target.
-    // In LOG mode we don't know the target PID, but we note the attempt.
+fn handle_ptrace(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
     let proc_event = ProcessEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
-        operation: ProcessOp::Signal, // Closest existing operation type
-        target_pid: None,             // Unknown in LOG mode
-        exe: event.exe.clone(),
-        comm: event.comm.clone(),
+        operation: ProcessOp::Signal,
+        target_pid: None,
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
     };
-    if let Some(action) = &mut container.current_action {
-        action.record_process_event(proc_event);
-    }
+    container.record_process_event(ev.pid, proc_event);
 }
 
-fn handle_fork(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64) {
-    // In LOG mode, we see the parent's event but don't know the child PID
-    // from the audit record. We ensure the parent is tracked and note the fork.
-
-
+fn handle_fork(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
     let proc_event = ProcessEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: ProcessOp::Fork,
-        target_pid: None, // Unknown in LOG mode
-        exe: event.exe.clone(),
-        comm: event.comm.clone(),
+        target_pid: None,
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_process_event(proc_event);
-    }
-
-    // Any child forked from a tainted process inherits taint.
-    // We'll pick this up when we first see an event from the child PID
-    // and discover its parent via /proc.
+    container.record_process_event(ev.pid, proc_event);
 }
 
-fn handle_exec(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64) {
-    let is_new = container.baseline.is_new_binary(&event.exe);
+fn handle_exec(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    // Prefer the kernel-resolved path from AUDIT_PATH over ev.exe (from /proc/pid/exe).
+    // For short-lived processes, /proc/pid/exe may be gone but the audit record has it.
+    let exe_str = match &ev.detail {
+        SyscallDetail::Exec { path: Some(p), .. } if !p.is_empty() => p.to_string(),
+        _ => ev.exe.to_string(),
+    };
 
-    // Update or create the process entry with the new exe
-    if let Some(info) = container.process_table.processes.get_mut(&event.pid) {
-        info.exec_path = event.exe.clone();
-        info.comm = event.comm.clone();
+    if let Some(info) = container.process_table.processes.get_mut(&ev.pid) {
+        info.exec_path = exe_str.clone();
+        info.comm = ev.comm.as_str().to_string();
     }
 
     let proc_event = ProcessEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: ProcessOp::Exec,
         target_pid: None,
-        exe: event.exe.clone(),
-        comm: event.comm.clone(),
+        exe: exe_str.clone(),
+        comm: ev.comm.as_str().to_string(),
     };
 
-    // Also log as a file event (exec = loading a binary)
     let file_event = FileEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: FileOp::Exec,
-        path: event.exe.clone(),
+        path: exe_str.clone(),
         flags: 0,
         is_sensitive: false,
-        is_new_binary: is_new,
+        is_new_binary: false,
     };
 
-    // Record exec in the file graph
-    container.record_file_access(&event.exe, event.pid, FileOp::Exec);
-
-    if let Some(action) = &mut container.current_action {
-        action.record_process_event(proc_event);
-        action.record_file_event(file_event);
-    }
+    container.record_file_access(&exe_str, ev.pid, FileOp::Exec);
+    container.record_process_event(ev.pid, proc_event);
+    container.record_file_event(ev.pid, file_event);
 }
 
-fn handle_exit(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64) {
+fn handle_exit(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
     let proc_event = ProcessEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: ProcessOp::Exit,
         target_pid: None,
-        exe: event.exe.clone(),
-        comm: event.comm.clone(),
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_process_event(proc_event);
-    }
-
-    if let Some(info) = container.process_table.processes.get_mut(&event.pid) {
+    container.record_process_event(ev.pid, proc_event);
+    if let Some(info) = container.process_table.processes.get_mut(&ev.pid) {
         info.exited = true;
     }
+    // Clean up fd_table entries for the exiting process.
+    // Without this, stale (pid, fd) → path mappings accumulate if PIDs
+    // are reused by long-lived containers.
+    container.fd_table.retain(|(pid, _), _| *pid != ev.pid);
 }
 
-fn handle_open(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64, args: Option<&SyscallArgs>) {
-    // In USER_NOTIF mode, args.resolved_path has the actual file path.
-    // In LOG mode, path is unknown (empty).
-    let path = args
-        .and_then(|a| a.resolved_path.clone())
-        .unwrap_or_default();
-    let flags = args.map(|a| a.flags as u32).unwrap_or(0);
+fn handle_open(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    let (path, flags, ret) = match &ev.detail {
+        SyscallDetail::File { path, flags, ret, .. } => {
+            (path.to_string(), *flags as u32, *ret)
+        }
+        _ => (String::new(), 0, -1),
+    };
+
     let is_sensitive = !path.is_empty() && container.baseline.is_sensitive(&path);
     let is_write = flags & (libc::O_WRONLY as u32 | libc::O_RDWR as u32 | libc::O_CREAT as u32 | libc::O_TRUNC as u32) != 0;
-
     let op = if is_write { FileOp::OpenWrite } else { FileOp::Open };
 
     if !path.is_empty() {
-        container.record_file_access(&path, event.pid, op);
+        container.record_file_access(&path, ev.pid, op);
 
-        // Add to process open_files so it appears in FILES OBSERVED OPEN.
-        // This is critical for AUDIT_SYSCALL events where the /proc/pid/fd
-        // snapshot may miss short-lived file opens.
-        if let Some(info) = container.process_table.processes.get_mut(&event.pid)
+        if let Some(info) = container.process_table.processes.get_mut(&ev.pid)
             && !info.open_files.contains(&path)
         {
             info.open_files.push(path.clone());
         }
 
-        // Record fd→path mapping. For AUDIT_SYSCALL, return_value is the new fd.
-        if let Some(a) = args
-            && a.return_value >= 0
-        {
+        if ret >= 0 {
             container.fd_table.insert(
-                (event.pid, a.return_value as u64),
+                (ev.pid, ret as u64),
                 FdTarget::File(path.clone()),
             );
         }
     }
 
     let file_event = FileEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: op,
         path,
@@ -348,22 +244,17 @@ fn handle_open(container: &mut ContainerState, event: &SeccompEvent, timestamp: 
         is_sensitive,
         is_new_binary: false,
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_file_event(file_event);
-    }
+    container.record_file_event(ev.pid, file_event);
 }
 
 fn handle_file_rw(
     container: &mut ContainerState,
-    event: &SeccompEvent,
+    ev: &SyscallEvent,
     op: FileOp,
     timestamp: u64,
 ) {
-
-
     let file_event = FileEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: op,
         path: String::new(),
@@ -371,29 +262,26 @@ fn handle_file_rw(
         is_sensitive: false,
         is_new_binary: false,
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_file_event(file_event);
-    }
+    container.record_file_event(ev.pid, file_event);
 }
 
 fn handle_file_meta(
     container: &mut ContainerState,
-    event: &SeccompEvent,
+    ev: &SyscallEvent,
     op: FileOp,
     timestamp: u64,
-    args: Option<&SyscallArgs>,
 ) {
-    let path = args
-        .and_then(|a| a.resolved_path.clone())
-        .unwrap_or_default();
+    let path = match &ev.detail {
+        SyscallDetail::File { path, .. } => path.to_string(),
+        _ => String::new(),
+    };
 
     if !path.is_empty() {
-        container.record_file_access(&path, event.pid, op);
+        container.record_file_access(&path, ev.pid, op);
     }
 
     let file_event = FileEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: op,
         path,
@@ -401,41 +289,38 @@ fn handle_file_meta(
         is_sensitive: false,
         is_new_binary: false,
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_file_event(file_event);
-    }
+    container.record_file_event(ev.pid, file_event);
 }
 
 fn handle_network(
     container: &mut ContainerState,
-    event: &SeccompEvent,
+    ev: &SyscallEvent,
     op: NetOp,
     timestamp: u64,
-    args: Option<&SyscallArgs>,
 ) {
-    let remote_addr = args.and_then(|a| a.resolved_addr.clone());
+    let (remote_addr_str, fd) = match &ev.detail {
+        SyscallDetail::Network { target, fd } => (Some(target.display_addr()), Some(*fd)),
+        _ => (None, None),
+    };
 
-    // Record fd→network endpoint for connect/bind.
+    // Record fd→network endpoint for connect/bind
     if matches!(op, NetOp::Connect | NetOp::Bind)
-        && let Some(a) = args
-        && let Some(addr) = &remote_addr
+        && let Some(ref addr) = remote_addr_str
+        && let Some(fd) = fd
     {
         container.fd_table.insert(
-            (event.pid, a.raw[0]),
+            (ev.pid, fd),
             FdTarget::Network(addr.clone()),
         );
     }
 
-    // Add resolved address to the process's net_connections so it shows
-    // in the NETWORK section of receipts.
-    if let Some(addr) = &remote_addr
-        && let Some(info) = container.process_table.processes.get_mut(&event.pid)
+    // Add to process net_connections for receipt display
+    if let Some(ref addr) = remote_addr_str
+        && let Some(info) = container.process_table.processes.get_mut(&ev.pid)
     {
         let conn_str = match op {
-            NetOp::Connect => format!("connect {addr}"),
+            NetOp::Connect | NetOp::SendTo => format!("connect {addr}"),
             NetOp::Bind => format!("listen {addr}"),
-            NetOp::SendTo => format!("connect {addr}"), // UDP/QUIC: sendto carries dest addr
             _ => String::new(),
         };
         if !conn_str.is_empty() && !info.net_connections.contains(&conn_str) {
@@ -444,117 +329,185 @@ fn handle_network(
     }
 
     let net_event = NetworkEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: op,
-        family: String::new(),
-        local_addr: None,
-        remote_addr,
-        port: None,
-        is_first_seen: false,
+        remote_addr: remote_addr_str,
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_net_event(net_event);
-    }
+    container.record_net_event(ev.pid, net_event);
 }
 
-fn handle_pipe(_container: &mut ContainerState, _event: &SeccompEvent, timestamp: u64) {
-    // In LOG mode we can't track the fd pair. Just note pipe creation.
-    // We could create a taint edge if we knew the child — deferred.
-    let _ = timestamp;
-}
-
-fn handle_signal(container: &mut ContainerState, event: &SeccompEvent, timestamp: u64) {
-
-
+fn handle_signal(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
     let proc_event = ProcessEvent {
-        pid: event.pid,
+        pid: ev.pid,
         timestamp,
         operation: ProcessOp::Signal,
-        target_pid: None, // Unknown in LOG mode
-        exe: event.exe.clone(),
-        comm: event.comm.clone(),
+        target_pid: None,
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
     };
-
-    if let Some(action) = &mut container.current_action {
-        action.record_process_event(proc_event);
-    }
-
-    // In LOG mode we can't determine the target PID from the audit record,
-    // so we can't create taint edges for signals.
+    container.record_process_event(ev.pid, proc_event);
 }
 
-/// Ensure a process is in the process table.
-/// ppid is pre-resolved outside the lock by the daemon.
-fn ensure_process(container: &mut ContainerState, event: &SeccompEvent, ppid: u32, cmdline: &str, open_files: &[String], net_connections: &[String]) {
-    let pid = event.pid;
-    let already_exists = container.process_table.processes.contains_key(&pid);
+fn handle_ipc_open(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    let channel = match &ev.detail {
+        SyscallDetail::Ipc { channel, .. } => channel.clone(),
+        _ => return,
+    };
 
-    if already_exists {
-        // Update existing process (scoped borrow)
-        {
-            let info = container.process_table.processes.get_mut(&pid).unwrap();
-            if !cmdline.is_empty() && cmdline != info.cmdline {
-                info.cmdline = cmdline.to_string();
-            }
-            for f in open_files {
-                if !info.open_files.contains(f) {
-                    info.open_files.push(f.clone());
-                }
-            }
-            for c in net_connections {
-                if !info.net_connections.contains(c) {
-                    info.net_connections.push(c.clone());
-                }
-            }
-            if !event.comm.is_empty() {
-                info.comm = event.comm.clone();
-            }
-            if !event.exe.is_empty() {
-                info.exec_path = event.exe.clone();
-            }
-        }
-        // Record open files in file graph (borrow on process_table released)
-        for f in open_files {
-            container.record_file_access(f, pid, FileOp::Open);
-        }
+    // Record as both potential sender and receiver (opener may do either)
+    let proc_event = ProcessEvent {
+        pid: ev.pid,
+        timestamp,
+        operation: ProcessOp::Signal, // reuse Signal for IPC events in action log
+        target_pid: None,
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
+    };
+    container.record_process_event(ev.pid, proc_event);
+
+    // Ensure the IpcNode exists for this channel
+    container
+        .ipc_nodes
+        .entry(channel)
+        .or_insert_with(crate::state::IpcNode::new);
+}
+
+fn handle_mq_open(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    let (channel, fd) = match &ev.detail {
+        SyscallDetail::Ipc { channel, fd } => (channel.clone(), *fd),
+        _ => return,
+    };
+
+    // Register the fd → IPC channel mapping for later mq_timedsend/recv lookup
+    if fd >= 0 && !channel.is_empty() {
+        container.fd_table.insert(
+            (ev.pid, fd as u64),
+            FdTarget::Ipc(channel.clone()),
+        );
+    }
+
+    handle_ipc_open(container, ev, timestamp);
+}
+
+fn handle_ipc_send(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    let channel = resolve_ipc_channel(container, ev);
+    if channel.is_empty() {
         return;
     }
 
-    let is_original = false;
+    container.record_ipc_send(&channel, ev.pid);
+
+    let proc_event = ProcessEvent {
+        pid: ev.pid,
+        timestamp,
+        operation: ProcessOp::Signal,
+        target_pid: None,
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
+    };
+    container.record_process_event(ev.pid, proc_event);
+}
+
+fn handle_ipc_recv(container: &mut ContainerState, ev: &SyscallEvent, timestamp: u64) {
+    let channel = resolve_ipc_channel(container, ev);
+    if channel.is_empty() {
+        return;
+    }
+
+    container.record_ipc_recv(&channel, ev.pid);
+
+    let proc_event = ProcessEvent {
+        pid: ev.pid,
+        timestamp,
+        operation: ProcessOp::Signal,
+        target_pid: None,
+        exe: ev.exe.to_string(),
+        comm: ev.comm.as_str().to_string(),
+    };
+    container.record_process_event(ev.pid, proc_event);
+}
+
+/// Resolve the IPC channel name from the event detail.
+/// For SysV (msgget/msgsnd/msgrcv), the channel is in the detail directly.
+/// For POSIX mq (mq_timedsend/recv), the fd must be looked up in the fd_table.
+fn resolve_ipc_channel(container: &ContainerState, ev: &SyscallEvent) -> String {
+    match &ev.detail {
+        SyscallDetail::Ipc { channel, fd } => {
+            if !channel.is_empty() {
+                return channel.clone();
+            }
+            // Empty channel means we need fd lookup (POSIX mq_timedsend/recv)
+            if *fd >= 0 {
+                if let Some(FdTarget::Ipc(name)) = container.fd_table.get(&(ev.pid, *fd as u64)) {
+                    return name.clone();
+                }
+            }
+            String::new()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Ensure a process is in the process table.
+fn ensure_process(container: &mut ContainerState, ev: &SyscallEvent) {
+    let pid = ev.pid;
+    let ppid = ev.ppid;
+    let cmdline_str = ev.cmdline.to_string();
+    let exe_str = ev.exe.to_string();
+    let comm_str = ev.comm.as_str().to_string();
+
+    let already_exists = container.process_table.processes.contains_key(&pid);
+
+    if already_exists {
+        let info = container.process_table.processes.get_mut(&pid).unwrap();
+        if !cmdline_str.is_empty() && cmdline_str != info.cmdline {
+            info.cmdline = cmdline_str;
+        }
+        if !comm_str.is_empty() {
+            info.comm = comm_str;
+        }
+        if !exe_str.is_empty() {
+            info.exec_path = exe_str;
+        }
+        return;
+    }
 
     let parent_score = container.process_table.taint_score(ppid);
     let is_first_process = container.process_table.processes.is_empty();
     let has_active_action = container.current_action.is_some()
         && container.current_action_id > 0;
 
-    // Taint model:
-    //   - First process in container (sleep entrypoint): 0.0 (not agent-controlled)
-    //   - Process appearing during an active action: 1.0 (agent directly ran this)
-    //   - Child of a tainted process (fork): parent_score * 0.9
-    //   - Process not during an action and no tainted parent: 0.0
-    //
-    // This means taint originates from agent actions and propagates through
-    // IPC channels with decay. Pre-existing processes start clean and only
-    // become tainted if the agent's influence reaches them.
     let taint_score = if is_first_process {
-        0.0 // Container entrypoint (e.g., `sleep 300`) — not agent-controlled
+        0.0
     } else if has_active_action && parent_score == 0.0 {
-        1.0 // New process during an agent action — directly agent-controlled
+        1.0
     } else {
-        // Inherit from parent via fork decay
         parent_score * ChannelType::Fork.decay_factor()
     };
 
+    // Attribution follows causality:
+    // 1. Use the audit record's wall-clock timestamp to determine which
+    //    action was active when the syscall actually happened (not when
+    //    the daemon processed it). This fixes events leaking across
+    //    action boundaries due to the 200ms batch processing interval.
+    // 2. If the parent has an attributed action, inherit it (fork inheritance).
+    //    A `find / &` from action 1 stays attributed to action 1.
+    // 3. Fall back to current_action_id for processes without audit timestamps.
+    let attributed_action = if let Some(parent) = container.process_table.get(&ppid) {
+        parent.attributed_action
+    } else {
+        container.action_at_time(ev.timestamp_ms)
+    };
+
     let info = ProcessInfo {
-        pid: event.pid,
+        pid,
         ppid,
-        comm: event.comm.clone(),
-        exec_path: event.exe.clone(),
-        cmdline: cmdline.to_string(),
-        open_files: open_files.to_vec(),
-        net_connections: net_connections.to_vec(),
+        comm: comm_str,
+        exec_path: exe_str,
+        cmdline: cmdline_str,
+        open_files: Vec::new(),
+        net_connections: Vec::new(),
         taint_score,
         taint_source: if has_active_action && parent_score == 0.0 {
             format!("agent action #{}", container.current_action_id)
@@ -563,29 +516,19 @@ fn ensure_process(container: &mut ContainerState, event: &SeccompEvent, ppid: u3
         } else {
             String::new()
         },
-        is_original,
         exited: false,
         children: Vec::new(),
+        attributed_action,
     };
     container.process_table.add(info);
 
-    // Record open files in the file graph
-    for f in open_files {
-        container.record_file_access(f, event.pid, FileOp::Open);
-    }
-
-    // Add fork edge only if the parent is actually in this container's process table.
-    // docker exec processes have host-side parents (containerd-shim) that aren't in the
-    // container — these show up as independent entry points, not children.
     if !is_first_process && container.process_table.processes.contains_key(&ppid) {
         container.taint_graph.add_edge(
             ppid,
-            event.pid,
+            ev.pid,
             format!("fork (child of pid {})", ppid),
             ChannelType::Fork,
             0,
         );
-
     }
 }
-

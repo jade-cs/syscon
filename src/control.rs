@@ -5,11 +5,10 @@ use rocket::{delete, get, post, routes, Build, Rocket, State};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::{binlog, receipt, util};
+use crate::{receipt, util};
 use crate::state::DaemonState;
 
 type SharedState = Arc<Mutex<DaemonState>>;
-type SharedLogWriter = Option<Arc<binlog::LogWriter>>;
 
 // ── Request / Response types ────────────────────────────────────────
 
@@ -37,7 +36,6 @@ pub struct ContainerInfo {
 pub struct StatusResponse {
     ok: bool,
     containers: Vec<ContainerInfo>,
-    pid_cache_size: usize,
 }
 
 // ── Routes ──────────────────────────────────────────────────────────
@@ -60,7 +58,6 @@ async fn status(state: &State<SharedState>) -> Json<StatusResponse> {
     Json(StatusResponse {
         ok: true,
         containers,
-        pid_cache_size: state.pid_cache.len(),
     })
 }
 
@@ -85,7 +82,6 @@ async fn list_containers(state: &State<SharedState>) -> Json<Vec<ContainerInfo>>
 #[delete("/containers/<id>")]
 async fn delete_container(id: &str, state: &State<SharedState>) -> Json<serde_json::Value> {
     let mut state = state.lock().await;
-    state.pid_cache.retain(|_, v| v.as_deref() != Some(id));
     let removed = state.containers.remove(id).is_some();
     tracing::info!(container = %id, removed, "delete container");
     Json(serde_json::json!({ "ok": true, "removed": removed }))
@@ -97,7 +93,6 @@ async fn action_start(
     id: &str,
     req: Json<ActionStartRequest>,
     state: &State<SharedState>,
-    log_writer: &State<SharedLogWriter>,
 ) -> Json<ActionStartResponse> {
     let mut state = state.lock().await;
     let container = state.ensure_container(id);
@@ -115,14 +110,6 @@ async fn action_start(
         "action_start",
     );
 
-    if let Some(writer) = log_writer.inner() {
-        writer.send(binlog::LogEntry::ActionStart {
-            action_id,
-            command: req.command.clone(),
-            timestamp_ns: now,
-        });
-    }
-
     Json(ActionStartResponse {
         ok: true,
         action_id,
@@ -135,7 +122,6 @@ async fn action_end(
     id: &str,
     action_id: u64,
     state: &State<SharedState>,
-    log_writer: &State<SharedLogWriter>,
 ) -> Json<serde_json::Value> {
     // Yield briefly to let any in-flight audit events reach the processor.
     tokio::task::yield_now().await;
@@ -158,18 +144,22 @@ async fn action_end(
 
         // Build file flow edges and propagate taint
         container.build_file_flow_edges();
+        container.build_ipc_flow_edges();
         container
             .taint_graph
             .propagate_taint(&mut container.process_table);
 
-        receipt_text = receipt::generate_receipt(container, action_id);
-
         if let Some(mut action) = container.current_action.take() {
             action.end_time = Some(now);
+            action.wall_end_ms = Some(crate::events::wall_clock_ms());
             container.completed_actions.push(action);
         }
         container.last_receipt_time = now;
-    } // lock released here, before logging and binlog send
+
+        // Generate receipt (immutable borrows only)
+        let container = state.containers.get(id).unwrap();
+        receipt_text = receipt::generate_receipt(container, action_id, &state.ip_to_container);
+    }
 
     tracing::info!(
         action_id,
@@ -177,13 +167,6 @@ async fn action_end(
         receipt_len = receipt_text.len(),
         "action_end",
     );
-
-    if let Some(writer) = log_writer.inner() {
-        writer.send(binlog::LogEntry::ActionEnd {
-            action_id,
-            timestamp_ns: now,
-        });
-    }
 
     Json(serde_json::json!({
         "ok": true,
@@ -213,7 +196,7 @@ async fn list_actions(id: &str, state: &State<SharedState>) -> Json<serde_json::
             serde_json::json!({
                 "action_id": a.action_id,
                 "command": a.command,
-                "total_events": a.total_events,
+                "total_events": a.total_events(),
             })
         })
         .collect();
@@ -222,7 +205,7 @@ async fn list_actions(id: &str, state: &State<SharedState>) -> Json<serde_json::
         serde_json::json!({
             "action_id": a.action_id,
             "command": a.command,
-            "total_events": a.total_events,
+            "total_events": a.total_events(),
         })
     });
 
@@ -258,7 +241,7 @@ async fn action_receipt(
 
     match action {
         Some(action) => {
-            let receipt_text = receipt::generate_receipt_from_action(container, action);
+            let receipt_text = receipt::generate_receipt_from_action(container, action, &state.ip_to_container);
             Json(serde_json::json!({
                 "ok": true,
                 "action_id": action_id,
@@ -298,7 +281,10 @@ async fn snapshot_receipt(id: &str, state: &State<SharedState>) -> Json<serde_js
         .as_ref()
         .map(|a| a.action_id)
         .unwrap_or(0);
-    let receipt_text = receipt::generate_receipt(container, action_id);
+
+    // Re-borrow immutably for receipt generation (needs ip_to_container too)
+    let container = state.containers.get(id).unwrap();
+    let receipt_text = receipt::generate_receipt(container, action_id, &state.ip_to_container);
 
     Json(serde_json::json!({
         "ok": true,
@@ -356,11 +342,148 @@ async fn index() -> (rocket::http::ContentType, &'static str) {
     (rocket::http::ContentType::HTML, include_str!("index.html"))
 }
 
+// ── Experiment endpoints ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateExperimentRequest {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+pub struct AddContainerRequest {
+    container_id: String,
+    /// Optional IP addresses for this container. If provided, skips
+    /// the /proc/{pid}/net/fib_trie lookup (useful when the harness
+    /// already knows the container's IPs from Docker inspect).
+    #[serde(default)]
+    ips: Vec<String>,
+}
+
+/// Create a new experiment.
+#[post("/experiments", format = "json", data = "<req>")]
+async fn create_experiment(
+    req: Json<CreateExperimentRequest>,
+    state: &State<SharedState>,
+) -> Json<serde_json::Value> {
+    let mut state = state.lock().await;
+    let id = state.create_experiment(req.name.clone());
+    tracing::info!(experiment = %id, name = %req.name, "experiment created");
+    Json(serde_json::json!({ "ok": true, "experiment_id": id }))
+}
+
+/// Add a container to an experiment.
+#[post("/experiments/<id>/containers", format = "json", data = "<req>")]
+async fn add_experiment_container(
+    id: &str,
+    req: Json<AddContainerRequest>,
+    state: &State<SharedState>,
+) -> Json<serde_json::Value> {
+    let mut state = state.lock().await;
+    if state.add_container_to_experiment(id, &req.container_id) {
+        // Register provided IPs in the ip_to_container map
+        for ip_str in &req.ips {
+            if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                state.ip_to_container.insert(ip, req.container_id.clone());
+            }
+        }
+        tracing::info!(
+            experiment = %id,
+            container = %req.container_id,
+            ips = ?req.ips,
+            "container added to experiment"
+        );
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "ok": false, "error": "experiment not found" }))
+    }
+}
+
+/// List all experiments.
+#[get("/experiments")]
+async fn list_experiments(state: &State<SharedState>) -> Json<serde_json::Value> {
+    let state = state.lock().await;
+    let experiments: Vec<serde_json::Value> = state.experiments.values()
+        .map(|e| serde_json::json!({
+            "id": e.id,
+            "name": e.name,
+            "containers": e.container_ids,
+        }))
+        .collect();
+    Json(serde_json::json!({ "ok": true, "experiments": experiments }))
+}
+
+/// Aggregated receipt for an experiment (all containers, cross-container flows).
+#[get("/experiments/<id>/receipt")]
+async fn experiment_receipt(
+    id: &str,
+    state: &State<SharedState>,
+) -> Json<serde_json::Value> {
+    let state = state.lock().await;
+    let experiment = match state.experiments.get(id) {
+        Some(e) => e,
+        None => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "experiment not found",
+            }));
+        }
+    };
+    let receipt_text = receipt::generate_experiment_receipt(&state, experiment);
+    Json(serde_json::json!({
+        "ok": true,
+        "experiment_id": id,
+        "receipt": receipt_text,
+    }))
+}
+
+/// Receipt for a specific action across all containers in an experiment.
+#[get("/experiments/<id>/actions/<action_id>/receipt")]
+async fn experiment_action_receipt(
+    id: &str,
+    action_id: u64,
+    state: &State<SharedState>,
+) -> Json<serde_json::Value> {
+    let state = state.lock().await;
+    let experiment = match state.experiments.get(id) {
+        Some(e) => e,
+        None => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "experiment not found",
+            }));
+        }
+    };
+    let receipt_text = receipt::generate_experiment_action_receipt(&state, experiment, action_id);
+    Json(serde_json::json!({
+        "ok": true,
+        "experiment_id": id,
+        "action_id": action_id,
+        "receipt": receipt_text,
+    }))
+}
+
+/// DOT graph for an experiment (containers as cluster boxes, cross-container edges).
+#[get("/experiments/<id>/graph")]
+async fn experiment_graph(
+    id: &str,
+    state: &State<SharedState>,
+) -> (rocket::http::ContentType, String) {
+    let state = state.lock().await;
+    let experiment = match state.experiments.get(id) {
+        Some(e) => e,
+        None => {
+            return (rocket::http::ContentType::Plain, format!("experiment not found: {}", id));
+        }
+    };
+    let dot = crate::graph::render_experiment_dot(&state, experiment);
+    (rocket::http::ContentType::new("text", "vnd.graphviz"), dot)
+}
+
 /// Build the Rocket instance with shared state.
-pub fn rocket(state: SharedState, log_writer: SharedLogWriter) -> Rocket<Build> {
+pub fn rocket(state: SharedState) -> Rocket<Build> {
     rocket::build()
         .manage(state)
-        .manage(log_writer)
         .mount(
             "/",
             routes![
@@ -376,6 +499,12 @@ pub fn rocket(state: SharedState, log_writer: SharedLogWriter) -> Rocket<Build> 
                 influence_graph_dot,
                 viz_js,
                 index,
+                create_experiment,
+                add_experiment_container,
+                list_experiments,
+                experiment_receipt,
+                experiment_action_receipt,
+                experiment_graph,
             ],
         )
 }

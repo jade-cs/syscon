@@ -1,0 +1,4 @@
+FROM alpine:latest
+RUN apk add --no-cache python3 curl
+# Simple HTTP service that accepts POST data and writes to disk
+COPY service.py /app/service.py

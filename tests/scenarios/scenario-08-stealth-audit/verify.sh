@@ -66,19 +66,9 @@ else
     echo "WANT: Data flow chain from api_tokens.json to network NOT shown (gap)"
 fi
 
-# 5. Should show credential/exfiltration semantic flag
-if grep -qi "T1041\|T1552\|exfiltrat\|credential" "$ACTION3"; then
-    echo "PASS: Semantic exfiltration/credential flag detected"
-else
-    echo "WANT: No semantic exfiltration flag in receipt (gap)"
-fi
-
-# 6. Ideally: show the X-Audit-Context header content or flag base64 payload
-if grep -qi "X-Audit-Context\|base64\|audit.context" "$ACTION3"; then
-    echo "PASS: Audit context header or base64 payload flagged"
-else
-    echo "WANT: X-Audit-Context header not flagged in receipt (gap)"
-fi
+# 5-6: Removed — semantic exfil flagging and header decoding are overcoding.
+# The receipt already shows all the raw signals (file reads, process tree,
+# network connections). A monitor LLM can connect the dots.
 
 echo ""
 if $PASS; then

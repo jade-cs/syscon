@@ -14,22 +14,23 @@ use crate::events::ProcessOp;
 use crate::mitre;
 use crate::state::ContainerState;
 
+// ── Tuning constants ───────────────────────────────────────────────
+
+/// Max display length for cmdlines in semantic operation descriptions.
+const CMDLINE_TRUNCATE: usize = 70;
+
+/// Max remote addresses shown inline before collapsing to "+N more".
+const MAX_INLINE_REMOTE_ADDRS: usize = 3;
+
 /// A high-level operation detected from syscall patterns.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SemanticOp {
     /// Human-readable description.
     pub description: String,
     /// MITRE ATT&CK technique ID (e.g., "T1059.004").
     pub mitre_id: &'static str,
-    /// MITRE technique name.
-    pub mitre_name: &'static str,
-    /// ATT&CK tactic (e.g., "execution", "persistence").
-    pub tactic: &'static str,
     /// Severity: 0 = info, 1 = low, 2 = medium, 3 = high.
     pub severity: u8,
-    /// PIDs involved.
-    pub pids: Vec<u32>,
     /// Action ID where this was detected.
     pub action_id: u64,
 }
@@ -73,7 +74,7 @@ pub fn detect_operations(container: &ContainerState) -> Vec<SemanticOp> {
                     .unwrap_or("");
 
                 let description = if !cmdline.is_empty() {
-                    format!("{}: {}", rule.name, truncate(cmdline, 70))
+                    format!("{}: {}", rule.name, truncate(cmdline, CMDLINE_TRUNCATE))
                 } else {
                     rule.name.to_string()
                 };
@@ -81,10 +82,7 @@ pub fn detect_operations(container: &ContainerState) -> Vec<SemanticOp> {
                 ops.push(SemanticOp {
                     description,
                     mitre_id: rule.technique_id,
-                    mitre_name: rule.technique_name,
-                    tactic: rule.tactic,
                     severity: rule.severity,
-                    pids: vec![pid],
                     action_id: aid,
                 });
             }
@@ -125,10 +123,7 @@ pub fn detect_operations(container: &ContainerState) -> Vec<SemanticOp> {
                     ops.push(SemanticOp {
                         description: format!("{}: {}", rule.name, path),
                         mitre_id: rule.technique_id,
-                        mitre_name: rule.technique_name,
-                        tactic: rule.tactic,
                         severity: rule.severity,
-                        pids: vec![pid],
                         action_id: aid,
                     });
                 }
@@ -166,9 +161,15 @@ pub fn detect_operations(container: &ContainerState) -> Vec<SemanticOp> {
                         .filter(|a| !is_local_addr(a))
                         .collect();
 
+                    // Skip network rules when all connections are local
+                    // (unix sockets, netlink, loopback)
+                    if remotes.is_empty() && rule.technique_id == "T1071" {
+                        continue;
+                    }
+
                     let desc = if remotes.is_empty() {
                         rule.name.to_string()
-                    } else if remotes.len() <= 3 {
+                    } else if remotes.len() <= MAX_INLINE_REMOTE_ADDRS {
                         format!("{}: {}", rule.name, remotes.join(", "))
                     } else {
                         format!("{}: {} +{} more", rule.name, remotes[..2].join(", "), remotes.len() - 2)
@@ -177,10 +178,7 @@ pub fn detect_operations(container: &ContainerState) -> Vec<SemanticOp> {
                     ops.push(SemanticOp {
                         description: desc,
                         mitre_id: rule.technique_id,
-                        mitre_name: rule.technique_name,
-                        tactic: rule.tactic,
                         severity: rule.severity,
-                        pids: vec![pid],
                         action_id: aid,
                     });
                 }
@@ -260,6 +258,9 @@ fn is_local_addr(addr: &str) -> bool {
         || addr.starts_with("0.0.0.0")
         || addr.starts_with("[::1]")
         || addr.starts_with("[::]")
+        || addr.starts_with("unix:")
+        || addr.starts_with("netlink:")
+        || addr.starts_with("packet:")
 }
 
 fn truncate(s: &str, max: usize) -> String {

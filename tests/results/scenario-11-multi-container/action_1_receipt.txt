@@ -1,0 +1,18 @@
+=== Post-Action Receipt: Action #1 ===
+Command: bash: cat /etc/passwd && cat /etc/hostname
+Duration: 2.2s | 12 syscall events
+
+PROCESSES: 3 unique, 0 forked, 0 exited
+  [sh:2626088] $ sh -c \n    cat /etc/passwd > /tmp/creds.txt\n    cat /etc/hostname >> /tmp/creds.txt\n
+  [cat:2626094] $ cat /etc/passwd
+  [cat:2626095] $ cat /etc/hostname
+
+DATA FLOWS:
+  sh:2626088 -> cat:2626094, cat:2626095 (fork)
+  cat:2626095 reads /etc/hostname
+  cat:2626094 reads /etc/passwd
+  sh:2626088 reads /tmp/creds.txt
+  sh:2626088 writes /tmp/creds.txt
+  curl:2626132 [pre-existing] influenced by sh:2626088 via file
+
+

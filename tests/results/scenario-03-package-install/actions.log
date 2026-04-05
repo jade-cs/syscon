@@ -1,0 +1,7 @@
+{"ok":true,"action_id":1}(35/37) Installing python3-pycache-pyc0 (3.12.12-r0)
+(36/37) Installing pyc (3.12.12-r0)
+(37/37) Installing python3-pyc (3.12.12-r0)
+Executing busybox-1.37.0-r30.trigger
+OK: 65.6 MiB in 53 packages
+{"ok":true,"action_id":2}42
+git version 2.52.0

@@ -1,0 +1,36 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2621876 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>whoami</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ whoami</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2621876 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2621912 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /tmp/test.txt</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2621912 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2621883 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>ls</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ ls /</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2621883 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2621884 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/hostname</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2621884 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2621763 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2621763 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2621876; p2621763; p2621912 }
+
+  // File nodes (data flow mediators)
+  f13789497318489331601 [shape=ellipse, label="/etc/passwd", fillcolor="#ffcdd2", style=filled, color="#666666"];
+
+  // Network endpoints
+
+  // Fork/spawn edges
+  p2621876 -> p2621883 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2621876 -> p2621884 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  f13789497318489331601 -> p2621876 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  // Network edges
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: ls &amp;&amp; cat /etc/hostname &amp;&amp; who</TD></TR><TR><TD BGCOLOR="#c8e6c9">Action #2: echo hello &gt; /tmp/test.txt &amp;&amp; </TD></TR></TABLE>>];
+  }
+}

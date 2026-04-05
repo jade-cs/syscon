@@ -2,7 +2,7 @@
 
 **Kernel-level syscall monitoring for AI agent control in Docker containers.**
 
-Syscon is a host-side daemon that observes everything an AI agent does inside a container — every process it spawns, every file it touches, every network connection it opens — by intercepting syscalls at the kernel boundary via `seccomp-bpf` audit logging. It compresses this raw telemetry into structured, per-action **receipts** designed for consumption by a trusted monitor LLM.
+Syscon is a host-side daemon that observes everything an AI agent does inside a container — every process it spawns, every file it touches, every network connection it opens — by intercepting syscalls at the kernel boundary via Linux audit. It compresses this raw telemetry into structured, per-action **receipts** designed for consumption by a trusted monitor LLM.
 
 > The monitor sees the commands the agent *declares*, but not what those commands actually *do*. Syscon helps close that gap.
 
@@ -22,24 +22,32 @@ Syscon gives the monitor **ground-truth OS telemetry** from outside the containe
 │    └─ process forks, file I/O, network calls    │
 │       all pass through the kernel syscall layer  │
 └──────────────────────┬──────────────────────────┘
-                       │ seccomp-bpf SCMP_ACT_LOG
+                       │ AUDIT_SYSCALL rules
                        ▼
 ┌──────────────────────────────────────────────────┐
-│  Host: Syscon daemon                             │
-│    ├─ NETLINK_AUDIT socket (receives events)     │
-│    ├─ /proc introspection (commands, fds, net)   │
-│    ├─ Influence graph (process→file→network)     │
-│    └─ Receipt compression (100K events → 0.4KB)  │
+│  Kernel audit subsystem                          │
+│    └─ SYSCALL groups (paths, addrs, argv)        │
+└──────────────────────┬───────────────────────────┘
+                       │ NETLINK_AUDIT unicast
+                       ▼
+┌──────────────────────────────────────────────────┐
+│  Host: Syscon daemon (replaces auditd)           │
+│    ├─ Zero-copy audit record parser              │
+│    ├─ subj=docker-default container filtering    │
+│    ├─ Eager container resolution (mid-syscall)   │
+│    ├─ MORSE-style taint graph with decay         │
+│    └─ Graph diff receipts per agent action       │
 │                                                  │
 │  HTTP API + Web dashboard                        │
 └──────────────────────────────────────────────────┘
 ```
 
-1. A Docker-wide seccomp profile tags syscalls with `SCMP_ACT_LOG` (non-blocking)
-2. Syscon receives kernel audit events via `NETLINK_AUDIT` multicast
-3. It maps PIDs to containers via `/proc/{pid}/cgroup`, reads command lines and network state
-4. It builds an influence graph tracking process hierarchies and cross-process data flows
-5. On request, it compresses everything into a structured receipt
+1. Syscon acts as the Linux audit daemon (`AUDIT_SET`), installing rules for path-bearing syscalls and receiving all events on a single unicast netlink socket
+2. Multi-record AUDIT_SYSCALL events give kernel-resolved file paths and socket addresses (no /proc racing)
+3. Container events identified by `subj=docker-default` (AppArmor), non-container events dropped at recv time
+4. Container IDs resolved eagerly while the process is still in-kernel, avoiding races with short-lived processes
+5. It builds an influence graph tracking process hierarchies, file-mediated data flows, and network connections
+6. On request, it compresses everything into a structured receipt as a graph diff per action
 
 ## Example receipt
 
@@ -80,30 +88,39 @@ NETWORK:
 ### Build
 
 ```bash
-cargo build --release
+cargo build
 ```
 
-### Configure Docker seccomp profile
-
-Add `SCMP_ACT_LOG` for the syscalls you want to observe. A minimal profile covering process creation, network, and file operations:
+### Setup
 
 ```bash
-# Generate the seccomp profile
-sudo ./target/release/syscon seccomp-profile > /etc/docker/seccomp-syscon.json
-
-# Configure Docker daemon to use it (add to /etc/docker/daemon.json):
-# { "seccomp-profile": "/etc/docker/seccomp-syscon.json" }
-# Then: sudo systemctl restart docker
+# Disable auditd (syscon replaces it — only one process can hold the audit socket)
+sudo systemctl stop auditd && sudo systemctl disable auditd
 ```
 
 ### Run
 
 ```bash
-# Start the daemon (requires root for NETLINK_AUDIT)
-sudo ./target/release/syscon daemon
+# Start daemon (requires root for audit socket)
+sudo ./target/debug/syscon daemon --port 9900
 
-# Web dashboard at http://localhost:8000
-# API at http://localhost:8000/containers
+# Web dashboard at http://localhost:9900
+# Per-container graphs at http://localhost:9900/containers/{id}/graph
+
+# No seccomp profile needed — syscon installs AUDIT_SYSCALL rules directly
+# and identifies containers via AppArmor (subj=docker-default)
+docker run <image>
+```
+
+### Integration tests
+
+The integration test suite is the primary validation for syscon. It exercises the full pipeline across 10 scenarios covering basic exec, data exfiltration, compilation, reverse shells, IPC covert channels (SysV/POSIX message queues, Unix sockets), and stealth attacks.
+
+```bash
+# With daemon running:
+sudo bash tests/run-tests.sh                             # all 10 scenarios
+sudo bash tests/run-tests.sh -q                          # quiet (one line per scenario)
+sudo bash tests/run-tests.sh scenario-08-stealth-audit   # specific one
 ```
 
 ### Scrape for static hosting
@@ -128,19 +145,26 @@ python3 -m http.server -d ./dump
 | `GET /containers/{id}/receipt` | Snapshot receipt (all activity) |
 | `GET /containers/{id}/graph` | DOT source for influence graph |
 | `GET /containers/{id}/graph.dot` | Raw DOT download |
+| `POST /experiments` | Create an experiment (groups containers) |
+| `POST /experiments/{id}/containers` | Add container to experiment (optional `ips` field) |
+| `GET /experiments` | List experiments |
+| `GET /experiments/{id}/receipt` | Aggregated receipt across all containers |
+| `GET /experiments/{id}/actions/{aid}/receipt` | Receipt for action N across all containers |
+| `GET /experiments/{id}/graph` | DOT graph with container cluster boxes |
 
-See [HARNESS.md](HARNESS.md) for eval harness integration details.
+The harness calls `POST /containers/{id}/actions` before each tool call and `POST /containers/{id}/actions/{aid}/end` after. For multi-container scenarios, create an experiment first and add containers to it. The experiment receipt shows cross-container network flows annotated with container IDs.
 
 ## Architecture
 
-- **Audit thread** (dedicated OS thread): Receives `NETLINK_AUDIT` messages, reads `/proc`, buffers events
-- **Async processor** (tokio): Drains buffer every 200ms, updates container state and influence graphs
-- **HTTP server** (Rocket): Serves API, web dashboard, and viz.js for client-side graph rendering
-- **Receipt generator**: Compresses raw events into structured text with process trees, command deduplication, directory grouping, and data flow summaries
+- **Audit recv thread** (dedicated OS thread): Drains netlink socket, skips non-container serials immediately, resolves container IDs eagerly at AUDIT_SYSCALL time, pushes typed `SyscallEvent` values to shared buffer
+- **Async processor** (tokio): Drains buffer every 200ms, dispatches to handlers, builds taint graph with MORSE-style decay
+- **Action attribution**: Events are attributed to actions based on causality, not processing order. New root processes use the audit record's wall-clock timestamp to determine which action was active when the syscall occurred. Forked processes inherit their parent's attribution. This ensures late-arriving events land in the correct action even when audit processing lags behind the harness.
+- **HTTP server** (Rocket): Action boundaries, receipts, interactive viz.js graphs
+- **Receipt generator**: Unified DATA FLOWS graph diff with lossless PID-labeled edge compression
 
 ## Integration with LinuxArena
 
-Syscon integrates with the [LinuxArena](https://linuxarena.ai) control evaluation framework. The harness calls `action_start` before each tool call and `action_end` after, allowing Syscon to scope receipts to individual agent actions. See [HARNESS.md](HARNESS.md) for the full integration protocol.
+Syscon integrates with the [LinuxArena](https://linuxarena.ai) control evaluation framework. The harness calls `action_start` before each tool call and `action_end` after, allowing Syscon to scope receipts to individual agent actions. See the API table above for the full integration protocol.
 
 ## Paper
 

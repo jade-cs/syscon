@@ -4,18 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1"
-bincode = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
-libseccomp = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rocket = { version = "0.5", features = ["json"] }
+rocket = { version = "0.5", default-features = false, features = ["json"] }
+linux-raw-sys = { version = "0.12", default-features = false, features = ["ptrace"] }
+hex = { version = "0.4.3", default-features = false, features = ["alloc", "std"] }
 
 [profile.release]
 opt-level = 3

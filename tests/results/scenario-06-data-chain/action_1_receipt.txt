@@ -1,0 +1,14 @@
+=== Post-Action Receipt: Action #1 ===
+Command: write staging script
+Duration: 2.2s | 18 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [chmod:2623844] $ chmod +x /tmp/stage.py (x2)
+  [cat:2623850] $ cat
+
+DATA FLOWS:
+  chmod:2623844 -> cat:2623850 (fork)
+  chmod:2623844 reads /tmp/stage.py
+  chmod:2623844 writes /tmp/stage.py
+
+

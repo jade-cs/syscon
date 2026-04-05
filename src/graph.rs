@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::state::ContainerState;
+use crate::state::{ContainerState, DaemonState, Experiment};
 use crate::util;
 
 fn escape_dot(s: &str) -> String {
@@ -216,14 +216,8 @@ pub fn render_dot(container: &ContainerState) -> String {
             rows.push(format!("<FONT POINT-SIZE=\"8\">$ {}</FONT>", wrap_html(&cmd, 40)));
         }
         rows.push(format!("<FONT POINT-SIZE=\"7\" COLOR=\"#666666\">{}</FONT>", escape_html(&pid_line)));
-        if info.taint_score > 0.0 {
-            let taint_color = if info.taint_score > 0.7 { "#cc0000" } else if info.taint_score > 0.3 { "#e65100" } else { "#666666" };
-            rows.push(format!(
-                "<FONT POINT-SIZE=\"7\" COLOR=\"{}\">taint {:.0}%{}</FONT>",
-                taint_color,
-                info.taint_score * 100.0,
-                if info.exited { " (exited)" } else { "" },
-            ));
+        if info.exited {
+            rows.push("<FONT POINT-SIZE=\"7\" COLOR=\"#666666\">(exited)</FONT>".to_string());
         }
 
         let label = rows
@@ -552,5 +546,218 @@ fn path_id(path: &str) -> u64 {
         hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
     }
     hash
+}
+
+/// Render a DOT graph for an experiment, with each container in a cluster box.
+/// Cross-container network edges are drawn between clusters.
+pub fn render_experiment_dot(state: &DaemonState, experiment: &Experiment) -> String {
+    let mut dot = String::with_capacity(16384);
+    writeln!(dot, "digraph experiment {{").unwrap();
+    writeln!(dot, "  rankdir=LR;").unwrap();
+    writeln!(dot, "  bgcolor=\"#fafafa\";").unwrap();
+    writeln!(dot, "  compound=true;").unwrap();
+    writeln!(dot, "  node [fontname=\"monospace\", fontsize=9, margin=\"0.15,0.1\"];").unwrap();
+    writeln!(dot, "  edge [fontname=\"monospace\", fontsize=8];").unwrap();
+    writeln!(dot).unwrap();
+
+    // Collect all actions across all containers for the legend
+    let mut all_actions: Vec<(u64, String)> = Vec::new();
+
+    // Render each container as a subgraph cluster (same data flow logic as render_dot)
+    for (idx, cid) in experiment.container_ids.iter().enumerate() {
+        let Some(container) = state.containers.get(cid) else { continue };
+        let short = &cid[..cid.len().min(12)];
+
+        // Collect actions for legend
+        for action in &container.completed_actions {
+            if action.action_id == 0 { continue; }
+            if !all_actions.iter().any(|(id, _)| *id == action.action_id) {
+                all_actions.push((action.action_id, action.command.clone()));
+            }
+        }
+
+        // Determine which files to show (same logic as render_dot)
+        let mut shown_files: HashSet<&str> = HashSet::new();
+        for (path, node) in &container.file_nodes {
+            if skip_path(path) { continue; }
+            let only_exec = node.writers.is_empty() && node.readers.is_empty()
+                && node.deleters.is_empty() && node.modifiers.is_empty()
+                && !node.executors.is_empty();
+            if only_exec { continue; }
+            let writer_pids: HashSet<u32> = node.writers.iter().map(|(p, _)| *p).collect();
+            let reader_pids: HashSet<u32> = node.readers.iter().map(|(p, _)| *p).collect();
+            let executor_pids: HashSet<u32> = node.executors.iter().map(|(p, _)| *p).collect();
+            let consumer_pids: HashSet<u32> = reader_pids.union(&executor_pids).copied().collect();
+            let has_cross_flow = writer_pids.iter().any(|w| consumer_pids.iter().any(|r| w != r));
+            if has_cross_flow || is_sensitive_path(path) || !node.deleters.is_empty()
+                || !node.modifiers.is_empty() || (!node.writers.is_empty() && !consumer_pids.is_empty()) {
+                shown_files.insert(path.as_str());
+            }
+        }
+
+        // Container cluster box
+        writeln!(dot, "  subgraph cluster_{} {{", idx).unwrap();
+        writeln!(dot, "    label=\"Container {}\";", short).unwrap();
+        writeln!(dot, "    style=rounded; color=\"#666666\"; fontsize=10;").unwrap();
+        writeln!(dot).unwrap();
+
+        // Process nodes (top N by taint)
+        let mut proc_list: Vec<_> = container.process_table.processes.iter()
+            .filter(|(_, info)| info.taint_score >= 0.1)
+            .collect();
+        proc_list.sort_by(|a, b| b.1.taint_score.partial_cmp(&a.1.taint_score).unwrap_or(std::cmp::Ordering::Equal));
+        let max_nodes = 50;
+        let shown_pids: HashSet<u32> = proc_list.iter().take(max_nodes).map(|(pid, _)| **pid).collect();
+
+        for &(pid, info) in proc_list.iter().take(max_nodes) {
+            let action_id = find_process_action(container, *pid);
+            let (fill, border) = action_color(action_id);
+            let fill = taint_gradient(fill, info.taint_score);
+            let comm = util::decode_comm(&info.comm);
+            let cmd_short = if info.cmdline.len() > 40 {
+                format!("{}...", &info.cmdline[..40])
+            } else {
+                info.cmdline.clone()
+            };
+            writeln!(dot, "    c{}p{} [shape=plaintext, label=<<TABLE BORDER=\"1\" CELLBORDER=\"0\" CELLSPACING=\"2\" CELLPADDING=\"4\" BGCOLOR=\"{}\" COLOR=\"{}\" STYLE=\"ROUNDED\"><TR><TD ALIGN=\"LEFT\"><B>{}</B></TD></TR><TR><TD ALIGN=\"LEFT\"><FONT POINT-SIZE=\"8\">$ {}</FONT></TD></TR><TR><TD ALIGN=\"LEFT\"><FONT POINT-SIZE=\"7\" COLOR=\"#666666\">pid {} | action #{}</FONT></TD></TR></TABLE>>];",
+                idx, pid, fill, border,
+                escape_html(&comm), escape_html(&cmd_short), pid, action_id,
+            ).unwrap();
+        }
+
+        // File nodes
+        for path in &shown_files {
+            let node = &container.file_nodes[*path];
+            let fill = if is_sensitive_path(path) { "#ffcdd2" }
+                else if !node.executors.is_empty() { "#ffe0b2" }
+                else if !node.deleters.is_empty() { "#ef9a9a" }
+                else { "#e3f2fd" };
+            writeln!(dot, "    c{}f{} [shape=ellipse, label=\"{}\", fillcolor=\"{}\", style=filled, color=\"#666666\"];",
+                idx, path_id(path), escape_dot(short_path(path)), fill).unwrap();
+        }
+
+        // Network endpoint nodes
+        let mut net_endpoints: HashMap<String, Vec<(u32, &str)>> = HashMap::new();
+        for (pid, info) in &container.process_table.processes {
+            for conn in &info.net_connections {
+                if let Some(a) = conn.strip_prefix("connect ") {
+                    net_endpoints.entry(a.to_string()).or_default().push((*pid, "connect"));
+                } else if let Some(a) = conn.strip_prefix("listen ") {
+                    net_endpoints.entry(a.to_string()).or_default().push((*pid, "listen"));
+                }
+            }
+        }
+        for endpoint in net_endpoints.keys() {
+            if endpoint.starts_with("0.0.0.0:") || endpoint.starts_with("[::]:") { continue; }
+            writeln!(dot, "    c{}n{} [shape=diamond, label=\"{}\", fillcolor=\"#ffe0e0\", style=filled, color=\"#cc0000\"];",
+                idx, path_id(endpoint), escape_dot(endpoint)).unwrap();
+        }
+
+        // Fork/taint edges
+        for edge in &container.taint_graph.edges {
+            if shown_pids.contains(&edge.source_pid) && shown_pids.contains(&edge.target_pid) {
+                let source_score = container.process_table.taint_score(edge.source_pid);
+                let color = if source_score >= 0.1 {
+                    let intensity = (source_score * 255.0) as u8;
+                    format!("#cc{:02x}{:02x}", 255 - intensity, 255 - intensity)
+                } else { "#cccccc".to_string() };
+                writeln!(dot, "    c{}p{} -> c{}p{} [label=\"{}\", color=\"{}\", fontcolor=\"{}\", style=dashed, penwidth=1.0];",
+                    idx, edge.source_pid, idx, edge.target_pid,
+                    escape_dot(&format!("{}", edge.channel_type)), color, color).unwrap();
+            }
+        }
+
+        // Data flow edges (process → file → process)
+        for path in &shown_files {
+            let node = &container.file_nodes[*path];
+            let fid = path_id(path);
+            for (pid, _) in &node.writers {
+                if shown_pids.contains(pid) {
+                    writeln!(dot, "    c{}p{} -> c{}f{} [label=\"write\", color=\"#2e7d32\", fontcolor=\"#2e7d32\", penwidth=1.5];",
+                        idx, pid, idx, fid).unwrap();
+                }
+            }
+            for (pid, _) in &node.readers {
+                if shown_pids.contains(pid) {
+                    writeln!(dot, "    c{}f{} -> c{}p{} [label=\"read\", color=\"#1565c0\", fontcolor=\"#1565c0\"];",
+                        idx, fid, idx, pid).unwrap();
+                }
+            }
+            for (pid, _) in &node.executors {
+                if shown_pids.contains(pid) {
+                    writeln!(dot, "    c{}f{} -> c{}p{} [label=\"exec\", color=\"#e65100\", fontcolor=\"#e65100\", penwidth=2.0, style=bold];",
+                        idx, fid, idx, pid).unwrap();
+                }
+            }
+        }
+
+        // Network edges
+        for (endpoint, procs) in &net_endpoints {
+            if endpoint.starts_with("0.0.0.0:") || endpoint.starts_with("[::]:") { continue; }
+            let nid = path_id(endpoint);
+            for (pid, direction) in procs {
+                if !shown_pids.contains(pid) { continue; }
+                match *direction {
+                    "connect" => writeln!(dot, "    c{}p{} -> c{}n{} [label=\"connect\", color=\"#cc0000\", fontcolor=\"#cc0000\", penwidth=1.5];",
+                        idx, pid, idx, nid).unwrap(),
+                    "listen" => writeln!(dot, "    c{}n{} -> c{}p{} [label=\"listen\", color=\"#0d47a1\", fontcolor=\"#0d47a1\"];",
+                        idx, nid, idx, pid).unwrap(),
+                    _ => {}
+                }
+            }
+        }
+
+        writeln!(dot, "  }}").unwrap();
+        writeln!(dot).unwrap();
+    }
+
+    // Cross-container network edges
+    for (idx_a, cid_a) in experiment.container_ids.iter().enumerate() {
+        let Some(container_a) = state.containers.get(cid_a) else { continue };
+        for info in container_a.process_table.processes.values() {
+            if info.taint_score < 0.1 { continue; }
+            for conn in &info.net_connections {
+                if let Some(addr) = conn.strip_prefix("connect ") {
+                    if let Some((ip_str, _port)) = addr.rsplit_once(':') {
+                        if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                            if let Some(target_cid) = state.ip_to_container.get(&ip) {
+                                if let Some(idx_b) = experiment.container_ids.iter().position(|c| c == target_cid) {
+                                    if idx_a != idx_b {
+                                        writeln!(dot, "  c{}p{} -> c{}listen_{} [label=\"{}\", color=\"#d32f2f\", penwidth=2.0, style=bold];",
+                                            idx_a, info.pid, idx_b, path_id(&format!("0.0.0.0:{}", addr.rsplit_once(':').map(|(_,p)| p).unwrap_or(""))),
+                                            escape_dot(addr)).unwrap();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Legend
+    all_actions.sort_by_key(|(id, _)| *id);
+    writeln!(dot).unwrap();
+    writeln!(dot, "  subgraph cluster_legend {{").unwrap();
+    writeln!(dot, "    label=\"Legend\"; style=rounded; color=\"#cccccc\"; fontsize=10;").unwrap();
+    writeln!(dot, "    node [shape=plaintext, fontsize=8];").unwrap();
+    let mut legend_parts = Vec::new();
+    for (action_id, command) in &all_actions {
+        let (fill, _) = action_color(*action_id);
+        let cmd_short = if command.len() > 30 { &command[..30] } else { command };
+        legend_parts.push(format!(
+            "<TR><TD BGCOLOR=\"{}\">Action #{}: {}</TD></TR>",
+            fill, action_id, escape_html(cmd_short)
+        ));
+    }
+    if !legend_parts.is_empty() {
+        writeln!(dot, "    legend [label=<<TABLE BORDER=\"0\" CELLBORDER=\"1\" CELLSPACING=\"0\">{}</TABLE>>];",
+            legend_parts.join("")).unwrap();
+    }
+    writeln!(dot, "  }}").unwrap();
+
+    writeln!(dot, "}}").unwrap();
+    dot
 }
 

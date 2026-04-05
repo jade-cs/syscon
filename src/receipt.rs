@@ -2,10 +2,32 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::communities;
-use crate::events::{FileOp, NetOp, ProcessOp};
+use crate::events::ProcessOp;
 use crate::semantic;
-use crate::state::ContainerState;
+use crate::state::{ContainerState, DaemonState, Experiment};
 use crate::util;
+
+// ── Tuning constants ───────────────────────────────────────────────
+
+/// Initial capacity for the receipt string builder (bytes).
+/// Typical receipts are 1-4 KB; 4096 avoids most reallocations.
+const RECEIPT_STRING_CAPACITY: usize = 4096;
+
+/// Minimum length of a hex-only string to be treated as noise
+/// (container IDs, hashes from audit records).
+const HEX_NOISE_MIN_LEN: usize = 12;
+
+/// Minimum basename length before we consider whether it looks random/temp.
+const TEMP_BASENAME_MIN_LEN: usize = 6;
+
+/// Minimum basename length for "cc*" compiler temp file detection.
+const CC_TEMP_MIN_LEN: usize = 8;
+
+/// Minimum community size before it's shown in the PROCESS COMMUNITIES section.
+/// Communities with <= this many members are readable in the normal process tree.
+const COMMUNITY_DISPLAY_THRESHOLD: usize = 3;
+
+
 
 const RUNTIME_BINARIES: &[&str] = &["/runc", "/usr/bin/runc", "/usr/sbin/runc"];
 
@@ -55,7 +77,7 @@ fn is_noise_file(f: &str) -> bool {
         return true;
     }
     // Long hex strings (container IDs, hashes from audit)
-    if f.len() >= 12 && f.chars().all(|c| c.is_ascii_hexdigit()) {
+    if f.len() >= HEX_NOISE_MIN_LEN && f.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
     }
     // Bare filenames without path separators that look like audit noise
@@ -66,88 +88,179 @@ fn is_noise_file(f: &str) -> bool {
     false
 }
 
-/// Compress a list of file paths into grouped directory output lines.
-/// e.g. ["/usr/share/doc/curl/copyright", "/usr/share/doc/krb5/copyright"]
-/// → "/usr/share/doc/{curl, krb5, ...}/copyright"
+/// Files that must never be collapsed into a glob pattern.
+/// These are security-relevant and must always appear individually in receipts.
+fn is_sensitive_file(path: &str) -> bool {
+    path.contains("/etc/shadow")
+        || path.contains("/etc/passwd")
+        || path.contains("/.ssh/")
+        || path.contains("/etc/sudoers")
+        || path.contains("api_token")
+        || path.contains("secret")
+        || path.contains("credential")
+        || path.contains(".env")
+        || path.contains("private_key")
+        || path.contains("/etc/firewall")
+}
+
+/// Compress a sorted list of file paths using glob patterns.
+/// Groups files by directory, detects numeric ranges, and uses brace notation.
+/// Sensitive files are never compressed — they always appear individually.
 fn compress_file_list(files: &[String]) -> Vec<String> {
-    if files.len() <= 4 {
+    if files.len() <= 3 {
         return files.to_vec();
     }
 
-    // Group by parent directory
-    let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
+    // Separate sensitive files (never compressed)
+    let mut sensitive: Vec<String> = Vec::new();
+    let mut compressible: Vec<&String> = Vec::new();
     for f in files {
-        let dir = f.rfind('/').map(|i| &f[..i]).unwrap_or("/");
-        let fname = f.rfind('/').map(|i| &f[i + 1..]).unwrap_or(f);
-        by_dir.entry(dir.to_string()).or_default().push(fname.to_string());
-    }
-
-    let mut result = Vec::new();
-    let mut dirs: Vec<_> = by_dir.iter().collect();
-    dirs.sort_by_key(|(d, _)| (*d).clone());
-
-    for (dir, fnames) in dirs {
-        if fnames.len() == 1 {
-            result.push(format!("{}/{}", dir, fnames[0]));
-        } else if fnames.len() <= 3 {
-            result.push(format!("{}/{{{}}}", dir, fnames.join(", ")));
+        if is_sensitive_file(f) {
+            sensitive.push(f.clone());
         } else {
-            result.push(format!(
-                "{}/{{{}, ... +{} more}}",
-                dir,
-                fnames[..2].join(", "),
-                fnames.len() - 2
-            ));
+            compressible.push(f);
         }
     }
 
-    // If still too many lines (many directories), group by grandparent
-    if result.len() > 12 {
-        let mut by_grandparent: HashMap<String, usize> = HashMap::new();
-        for f in files {
-            // Take first 2 path components as grandparent
-            let parts: Vec<&str> = f.split('/').collect();
-            let gp = if parts.len() >= 4 {
-                parts[..3].join("/")
-            } else if parts.len() >= 3 {
-                parts[..2].join("/")
+    if compressible.len() <= 3 {
+        let mut result = sensitive;
+        result.extend(compressible.iter().map(|s| (*s).clone()));
+        result.sort();
+        return result;
+    }
+
+    // Group by directory
+    let mut by_dir: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    for path in &compressible {
+        let (dir, name) = match path.rfind('/') {
+            Some(i) => (&path[..i], &path[i + 1..]),
+            None => ("", path.as_str()),
+        };
+        by_dir.entry(dir).or_default().push(name);
+    }
+
+    let mut result = sensitive;
+
+    for (dir, names) in &by_dir {
+        if names.len() == 1 {
+            if dir.is_empty() {
+                result.push(names[0].to_string());
             } else {
-                f.clone()
-            };
-            *by_grandparent.entry(gp).or_default() += 1;
+                result.push(format!("{}/{}", dir, names[0]));
+            }
+            continue;
         }
-        let mut compressed = Vec::new();
-        let mut gps: Vec<_> = by_grandparent.iter().collect();
-        gps.sort_by(|a, b| b.1.cmp(a.1));
-        for (gp, count) in gps {
-            if *count > 1 {
-                compressed.push(format!("{}/ ({} files)", gp, count));
-            } else {
-                compressed.push(gp.clone());
+
+        // Try to find numeric range pattern
+        if let Some(compressed) = try_numeric_range(dir, names) {
+            result.push(compressed);
+            continue;
+        }
+
+        // Brace notation for same-directory files
+        if names.len() <= 5 {
+            let mut sorted = names.clone();
+            sorted.sort();
+            result.push(format!("{}/{{{}}}", dir, sorted.join(",")));
+        } else {
+            let mut sorted = names.clone();
+            sorted.sort();
+            result.push(format!("{}/{{{},{},... {}}} ({} files)",
+                dir, sorted[0], sorted[1], sorted.last().unwrap(), names.len()));
+        }
+    }
+
+    result.sort();
+    result
+}
+
+/// Try to compress filenames in a directory as a numeric range.
+/// Returns e.g. "/data/output/file_{000..109}_processed.json (110 files)"
+fn try_numeric_range(dir: &str, names: &[&str]) -> Option<String> {
+    if names.len() < 3 {
+        return None;
+    }
+
+    // Find common prefix and suffix around numeric parts
+    // e.g. "file_000_processed.json" → prefix="file_", suffix="_processed.json", num="000"
+    let first = names[0];
+
+    // Find first digit run in the first filename
+    let num_start = first.find(|c: char| c.is_ascii_digit())?;
+    let num_end = first[num_start..].find(|c: char| !c.is_ascii_digit())
+        .map(|i| num_start + i)
+        .unwrap_or(first.len());
+
+    let prefix = &first[..num_start];
+    let suffix = &first[num_end..];
+    let num_width = num_end - num_start;
+
+    // Check all names match this pattern
+    let mut nums: Vec<u64> = Vec::new();
+    for name in names {
+        if !name.starts_with(prefix) || !name.ends_with(suffix) {
+            return None;
+        }
+        let mid = &name[num_start..name.len() - suffix.len()];
+        if mid.len() != num_width {
+            return None;
+        }
+        nums.push(mid.parse().ok()?);
+    }
+
+    nums.sort();
+
+    // Check if contiguous
+    let min = nums[0];
+    let max = *nums.last().unwrap();
+    if max - min + 1 != nums.len() as u64 {
+        return None; // Not contiguous — fall back to brace notation
+    }
+
+    let min_str = format!("{:0>width$}", min, width = num_width);
+    let max_str = format!("{:0>width$}", max, width = num_width);
+
+    if dir.is_empty() {
+        Some(format!("{}{{{min_str}..{max_str}}}{suffix} ({} files)", prefix, nums.len()))
+    } else {
+        Some(format!("{dir}/{prefix}{{{min_str}..{max_str}}}{suffix} ({} files)", nums.len()))
+    }
+}
+
+/// Annotate a network address with the target container ID if the IP belongs
+/// to a monitored container. "172.17.0.3:8080" becomes "172.17.0.3:8080 (container abc123def456)".
+fn annotate_addr(addr: &str, ip_map: &IpMap) -> String {
+    // Parse the IP from addr formats like "1.2.3.4:8080", "[::1]:80", "unix:/path"
+    if let Some((ip_str, _port)) = addr.rsplit_once(':') {
+        if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+            if let Some(cid) = ip_map.get(&ip) {
+                return format!("{addr} (container {cid})");
             }
         }
-        return compressed;
     }
-
-    result
+    addr.to_string()
 }
 
 fn process_name(container: &ContainerState, pid: u32) -> String {
     container
         .process_table
         .get(&pid)
-        .map(|i| util::decode_comm(&i.comm))
-        .unwrap_or_else(|| "?".to_string())
+        .map(|i| format!("{}:{}", util::decode_comm(&i.comm), pid))
+        .unwrap_or_else(|| format!("?:{}", pid))
 }
+
+/// IP → container_id mapping for annotating cross-container network flows.
+pub type IpMap = std::collections::HashMap<std::net::Ipv4Addr, String>;
 
 pub fn generate_receipt_from_action(
     container: &ContainerState,
     action: &crate::events::ActionLog,
+    ip_map: &IpMap,
 ) -> String {
-    generate_receipt_inner(container, action)
+    generate_receipt_inner(container, action, ip_map)
 }
 
-pub fn generate_receipt(container: &ContainerState, action_id: u64) -> String {
+pub fn generate_receipt(container: &ContainerState, action_id: u64, ip_map: &IpMap) -> String {
     let action = match &container.current_action {
         Some(a) if a.action_id == action_id => a,
         _ => {
@@ -157,14 +270,15 @@ pub fn generate_receipt(container: &ContainerState, action_id: u64) -> String {
             );
         }
     };
-    generate_receipt_inner(container, action)
+    generate_receipt_inner(container, action, ip_map)
 }
 
 fn generate_receipt_inner(
     container: &ContainerState,
     action: &crate::events::ActionLog,
+    ip_map: &IpMap,
 ) -> String {
-    let mut out = String::with_capacity(4096);
+    let mut out = String::with_capacity(RECEIPT_STRING_CAPACITY);
 
     let now = util::monotonic_ns();
     let start = if action.start_time == 0 {
@@ -180,15 +294,12 @@ fn generate_receipt_inner(
 
     writeln!(out, "=== Post-Action Receipt: Action #{} ===", action.action_id).unwrap();
     writeln!(out, "Command: {}", action.command).unwrap();
-    writeln!(out, "Duration: {:.1}s | {} syscall events", duration_s, action.total_events).unwrap();
+    writeln!(out, "Duration: {:.1}s | {} syscall events", duration_s, action.total_events()).unwrap();
     writeln!(out).unwrap();
 
     write_process_summary(&mut out, container, action);
     write_communities(&mut out, container, &action_pids);
-    write_activity_summary(&mut out, container, action);
-    write_files_observed(&mut out, container, &action_pids);
-    write_data_flows(&mut out, container, action.action_id, &action_pids);
-    write_network_summary(&mut out, container, &action_pids);
+    write_graph_diff(&mut out, container, action.action_id, &action_pids, ip_map);
     write_semantic_summary(&mut out, container, action.action_id);
 
     out
@@ -248,22 +359,21 @@ fn write_process_summary(
     )
     .unwrap();
 
-    for (pid, exe, cmdline, taint, count) in &procs {
-        let name = exe.rsplit('/').next().unwrap_or(exe);
-        let taint_str = if *taint > 0.0 {
-            format!(" (taint {:.0}%)", taint * 100.0)
-        } else {
-            String::new()
-        };
+    for (pid, exe, cmdline, _taint, count) in &procs {
+        // Use the current comm from process table (updated by handle_exec)
+        // rather than the event's exe field, which may be the parent shell.
+        let name = container.process_table.get(pid)
+            .map(|i| util::decode_comm(&i.comm))
+            .unwrap_or_else(|| exe.rsplit('/').next().unwrap_or(exe).to_string());
         let count_str = if *count > 1 {
             format!(" (x{})", count)
         } else {
             String::new()
         };
         if !cmdline.is_empty() && *cmdline != *exe {
-            writeln!(out, "  [{}] $ {}{}{}", name, cmdline, count_str, taint_str).unwrap();
+            writeln!(out, "  [{}:{}] $ {}{}", name, pid, cmdline, count_str).unwrap();
         } else {
-            writeln!(out, "  [{}] pid {}{}{}", name, pid, count_str, taint_str).unwrap();
+            writeln!(out, "  [{}:{}]{}", name, pid, count_str).unwrap();
         }
     }
     writeln!(out).unwrap();
@@ -303,31 +413,6 @@ fn looks_like_ip_or_url(token: &str) -> bool {
     false
 }
 
-/// Normalize a command string for deduplication.
-/// Replaces random-looking path components (temp files, hashes) with <TMP>
-/// so that commands differing only in generated filenames are grouped.
-#[allow(dead_code)]
-fn normalize_cmd(cmd: &str) -> String {
-    let mut result = String::with_capacity(cmd.len());
-    for token in cmd.split(' ') {
-        if !result.is_empty() {
-            result.push(' ');
-        }
-        if looks_like_temp_path(token) {
-            // Replace the random filename but keep the directory
-            if let Some(slash) = token.rfind('/') {
-                result.push_str(&token[..slash + 1]);
-                result.push_str("<TMP>");
-            } else {
-                result.push_str("<TMP>");
-            }
-        } else {
-            result.push_str(token);
-        }
-    }
-    result
-}
-
 /// Check if a token looks like a path with a random/generated filename.
 /// Matches patterns like /tmp/ccYlVQ3o.s, /tmp/pip-unpack-skq_x52f/foo.whl,
 /// conftest.er1, etc.
@@ -342,7 +427,7 @@ fn looks_like_temp_path(token: &str) -> bool {
 
     // Count random-looking characters (mixed case + digits in the basename)
     let base = filename.split('.').next().unwrap_or(filename);
-    if base.len() < 6 {
+    if base.len() < TEMP_BASENAME_MIN_LEN {
         return false;
     }
 
@@ -358,7 +443,7 @@ fn looks_like_temp_path(token: &str) -> bool {
     }
 
     // Compiler temp files: cc*.s, cc*.o patterns
-    if base.starts_with("cc") && mixed >= 2 && base.len() >= 8 {
+    if base.starts_with("cc") && mixed >= 2 && base.len() >= CC_TEMP_MIN_LEN {
         return true;
     }
 
@@ -376,7 +461,7 @@ fn write_communities(
     let comms = communities::detect_communities(container, action_pids);
 
     // Only show if there are non-trivial communities (>3 members)
-    let large_communities: Vec<_> = comms.iter().filter(|c| c.members.len() > 3).collect();
+    let large_communities: Vec<_> = comms.iter().filter(|c| c.members.len() > COMMUNITY_DISPLAY_THRESHOLD).collect();
     if large_communities.is_empty() {
         return;
     }
@@ -389,7 +474,7 @@ fn write_communities(
     // Summary of small communities
     let small_count: usize = comms
         .iter()
-        .filter(|c| c.members.len() <= 3)
+        .filter(|c| c.members.len() <= COMMUNITY_DISPLAY_THRESHOLD)
         .map(|c| c.members.len())
         .sum();
     if small_count > 0 {
@@ -398,260 +483,517 @@ fn write_communities(
     writeln!(out).unwrap();
 }
 
-/// Filesystem and network activity grouped by process name.
-fn write_activity_summary(
+/// Unified graph diff: all data relationships for this action as labeled edges.
+///
+/// Edge types:
+///   - `<proc> reads <file>`              — file inputs
+///   - `<proc> writes <file>`             — file outputs / side effects
+///   - `<proc> -> <proc> (fork)`          — process spawning
+///   - `<proc> -> <proc> (pipe)`          — pipe data flow
+///   - `<proc> connects <addr>`           — network outputs
+///   - `<proc> listens <addr>`            — network listeners
+///   - `<proc> (action #N) wrote <file> -> <proc> reads` — cross-action file flow
+///   - `<proc> [pre-existing] influenced by <proc> via <channel>` — taint crossing to pre-action process
+fn write_graph_diff(
     out: &mut String,
     container: &ContainerState,
-    action: &crate::events::ActionLog,
-) {
-    if action.file_op_counts.is_empty() && action.net_op_counts.is_empty() {
-        return;
-    }
-
-    writeln!(out, "ACTIVITY:").unwrap();
-
-    // File ops by process name
-    let mut file_by_name: HashMap<String, HashMap<FileOp, u64>> = HashMap::new();
-    for ((pid, op), count) in &action.file_op_counts {
-        let name = process_name(container, *pid);
-        *file_by_name.entry(name).or_default().entry(*op).or_default() += count;
-    }
-    if !file_by_name.is_empty() {
-        let total: u64 = action.file_op_counts.values().sum();
-        writeln!(out, "  Filesystem ({} ops):", total).unwrap();
-        let mut sorted: Vec<_> = file_by_name.iter().collect();
-        sorted.sort_by(|a, b| {
-            let ta: u64 = a.1.values().sum();
-            let tb: u64 = b.1.values().sum();
-            tb.cmp(&ta)
-        });
-        for (name, ops) in &sorted {
-            let ops_str: Vec<String> = ops.iter().map(|(op, c)| format!("{} x{}", op, c)).collect();
-            writeln!(out, "    {}: {}", name, ops_str.join(", ")).unwrap();
-        }
-    }
-
-    // Net ops by process name
-    let mut net_by_name: HashMap<String, HashMap<NetOp, u64>> = HashMap::new();
-    for ((pid, op), count) in &action.net_op_counts {
-        let name = process_name(container, *pid);
-        *net_by_name.entry(name).or_default().entry(*op).or_default() += count;
-    }
-    if !net_by_name.is_empty() {
-        writeln!(out, "  Network:").unwrap();
-        for (name, ops) in &net_by_name {
-            let ops_str: Vec<String> = ops.iter().map(|(op, c)| format!("{} x{}", op, c)).collect();
-            writeln!(out, "    {}: {}", name, ops_str.join(", ")).unwrap();
-        }
-    }
-
-    writeln!(out).unwrap();
-}
-
-/// Files observed open by processes in this action (from /proc/fd snapshots).
-/// Grouped by process name, showing unique paths. Filters noise.
-fn write_files_observed(
-    out: &mut String,
-    container: &ContainerState,
+    action_id: u64,
     action_pids: &std::collections::HashSet<u32>,
+    ip_map: &IpMap,
 ) {
-    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    let mut edges: Vec<String> = Vec::new();
 
-    // From /proc/pid/fd snapshots (may miss short-lived processes)
-    for pid in action_pids {
-        let info = match container.process_table.get(pid) {
-            Some(i) => i,
-            None => continue,
-        };
-        let name = util::decode_comm(&info.comm);
-        let files = by_name.entry(name).or_default();
-        for f in &info.open_files {
-            if !is_noise_file(f) && !files.contains(f) {
-                files.push(f.clone());
+    // Pre-pass: build cross-action file flows and track which (pid, path) pairs
+    // are already explained by a cross-action edge, so we can suppress redundant
+    // intra-action read edges.
+    let mut cross_action_covered: std::collections::HashSet<(u32, String)> =
+        std::collections::HashSet::new();
+    for (path, node) in &container.file_nodes {
+        if is_noise_file(path) { continue; }
+        let prior_writers: Vec<(u32, u64)> = node.writers.iter()
+            .filter(|(_, aid)| *aid != action_id && *aid != 0)
+            .copied()
+            .collect();
+        if prior_writers.is_empty() { continue; }
+        let action_readers: Vec<u32> = node.readers.iter()
+            .chain(node.executors.iter())
+            .filter(|(pid, _)| action_pids.contains(pid))
+            .map(|(pid, _)| *pid)
+            .collect();
+        if action_readers.is_empty() { continue; }
+
+        for (wpid, waid) in &prior_writers {
+            let wname = process_name(container, *wpid);
+            for &rpid in &action_readers {
+                if node.writers.iter().any(|(p, _)| *p == rpid) { continue; }
+                let rname = process_name(container, rpid);
+                edges.push(format!("  {} (action #{}) wrote {} -> {} reads", wname, waid, path, rname));
+                cross_action_covered.insert((rpid, path.clone()));
             }
         }
     }
 
-    // From file_nodes (kernel-resolved paths via AUDIT_SYSCALL — catches
-    // short-lived processes like `cat /etc/passwd` that exit before /proc/fd snapshot)
+    // 1. File reads — what this action's processes consumed
+    //    Excludes paths already shown via cross-action flow edges above.
+    let mut reads_by_proc: HashMap<String, Vec<String>> = HashMap::new();
     for (path, node) in &container.file_nodes {
-        // Skip nodes with no readers/executors at all (vast majority of file_nodes)
-        if node.readers.is_empty() && node.executors.is_empty() {
-            continue;
-        }
-        if is_noise_file(path) {
-            continue;
-        }
-        for (pid, _) in node.readers.iter().chain(node.executors.iter()) {
-            if !action_pids.contains(pid) {
-                continue;
-            }
+        if is_noise_file(path) { continue; }
+        for (pid, _aid) in node.readers.iter().chain(node.executors.iter()) {
+            if !action_pids.contains(pid) { continue; }
+            if cross_action_covered.contains(&(*pid, path.clone())) { continue; }
             let name = process_name(container, *pid);
-            let files = by_name.entry(name).or_default();
+            let files = reads_by_proc.entry(name).or_default();
             if !files.contains(path) {
                 files.push(path.clone());
             }
         }
     }
-
-    // Remove entries with no interesting files
-    by_name.retain(|_, files| !files.is_empty());
-
-    if by_name.is_empty() {
-        return;
-    }
-
-    writeln!(out, "FILES OBSERVED OPEN:").unwrap();
-    let mut sorted: Vec<_> = by_name.iter().collect();
-    sorted.sort_by_key(|(name, _)| (*name).clone());
-    for (name, files) in sorted {
-        let mut sorted_files = files.clone();
-        sorted_files.sort();
-        writeln!(out, "  {}: {}", name, sorted_files.join(", ")).unwrap();
-    }
-    writeln!(out).unwrap();
-}
-
-/// Data flows scoped to this action.
-fn write_data_flows(
-    out: &mut String,
-    container: &ContainerState,
-    action_id: u64,
-    action_pids: &std::collections::HashSet<u32>,
-) {
-    let mut flows: Vec<String> = Vec::new();
-    let mut writes_by_dir: HashMap<String, Vec<String>> = HashMap::new();
-
-    for (path, node) in &container.file_nodes {
-        // Skip nodes with no writers and no readers (common)
-        if node.writers.is_empty() && node.readers.is_empty() && node.executors.is_empty() {
-            continue;
-        }
-        if path.starts_with("/proc/") || path.starts_with("/dev/")
-            || path.starts_with("/sys/") || path.contains("(deleted)")
-        {
-            continue;
-        }
-
-        let action_writers: Vec<u32> = node.writers.iter()
-            .filter(|(_, aid)| *aid == action_id)
-            .map(|(p, _)| *p).collect();
-        let action_consumers: Vec<u32> = node.readers.iter().chain(node.executors.iter())
-            .filter(|(p, _)| action_pids.contains(p))
-            .map(|(p, _)| *p).collect();
-
-        // Cross-process data flow (skip .so libraries)
-        let is_lib = path.starts_with("/usr/lib/") && path.contains(".so");
-        if !is_lib {
-            let all_writers: std::collections::HashSet<u32> =
-                node.writers.iter().map(|(p, _)| *p).collect();
-            let mut consumers: Vec<String> = Vec::new();
-            for rpid in &action_consumers {
-                if !all_writers.contains(rpid) {
-                    let name = process_name(container, *rpid);
-                    if !consumers.contains(&name) { consumers.push(name); }
-                }
-            }
-            if !all_writers.is_empty() && !consumers.is_empty() {
-                if !action_writers.is_empty() {
-                    let mut wnames: Vec<String> = action_writers.iter()
-                        .map(|p| process_name(container, *p)).collect();
-                    wnames.sort(); wnames.dedup();
-                    flows.push(format!("  {} -[{}]-> {}", wnames.join(", "), path, consumers.join(", ")));
-                } else {
-                    // Writer was in a prior action — show which action and process
-                    let mut wnames: Vec<String> = node.writers.iter()
-                        .map(|(p, aid)| {
-                            let name = process_name(container, *p);
-                            if *aid > 0 {
-                                format!("{} (action #{})", name, aid)
-                            } else {
-                                format!("{} (pre-existing)", name)
-                            }
-                        })
-                        .collect();
-                    wnames.sort();
-                    wnames.dedup();
-                    flows.push(format!("  {} -[{}]-> {}", wnames.join(", "), path, consumers.join(", ")));
-                }
-            }
-        }
-
-        if !action_writers.is_empty() {
-            let dir = path.rfind('/').map(|i| &path[..i]).unwrap_or("/");
-            let filename = path.rfind('/').map(|i| &path[i + 1..]).unwrap_or(path);
-            writes_by_dir.entry(dir.to_string()).or_default().push(filename.to_string());
-        }
-    }
-
-    if !flows.is_empty() {
-        writeln!(out, "DATA FLOWS:").unwrap();
-        for f in &flows { writeln!(out, "{}", f).unwrap(); }
-        writeln!(out).unwrap();
-    }
-
-    if !writes_by_dir.is_empty() {
-        // Flatten back to full paths for compression
-        let mut all_written: Vec<String> = Vec::new();
-        for (dir, files) in &writes_by_dir {
-            for f in files {
-                all_written.push(format!("{}/{}", dir, f));
-            }
-        }
-        all_written.sort();
-        let compressed = compress_file_list(&all_written);
-        writeln!(out, "FILES WRITTEN:").unwrap();
-        for line in &compressed {
-            writeln!(out, "  {}", line).unwrap();
-        }
-        writeln!(out).unwrap();
-    }
-}
-
-/// Network connections grouped by destination.
-fn write_network_summary(
-    out: &mut String,
-    container: &ContainerState,
-    action_pids: &std::collections::HashSet<u32>,
-) {
-    // Group: process_name → (connect addrs, listen addrs)
-    let mut by_process: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
-
-    for (pid, info) in &container.process_table.processes {
-        if !action_pids.contains(pid) || info.net_connections.is_empty() {
-            continue;
-        }
+    for pid in action_pids {
+        let Some(info) = container.process_table.get(pid) else { continue };
         let name = process_name(container, *pid);
-        let entry = by_process.entry(name).or_default();
+        let files = reads_by_proc.entry(name).or_default();
+        for f in &info.open_files {
+            if !is_noise_file(f) && !files.contains(f)
+                && !cross_action_covered.contains(&(*pid, f.clone()))
+            {
+                files.push(f.clone());
+            }
+        }
+    }
+    for (name, mut files) in reads_by_proc {
+        files.sort();
+        files.dedup();
+        let compressed = compress_file_list(&files);
+        if !compressed.is_empty() {
+            edges.push(format!("  {} reads {}", name, compressed.join(", ")));
+        }
+    }
+
+    // 2. File writes — side effects
+    let mut writes_by_proc: HashMap<String, Vec<String>> = HashMap::new();
+    for (path, node) in &container.file_nodes {
+        if is_noise_file(path) { continue; }
+        for (pid, aid) in &node.writers {
+            if *aid != action_id || !action_pids.contains(pid) { continue; }
+            let name = process_name(container, *pid);
+            let files = writes_by_proc.entry(name).or_default();
+            if !files.contains(path) {
+                files.push(path.clone());
+            }
+        }
+    }
+    for (name, mut files) in writes_by_proc {
+        files.sort();
+        let compressed = compress_file_list(&files);
+        if !compressed.is_empty() {
+            edges.push(format!("  {} writes {}", name, compressed.join(", ")));
+        }
+    }
+
+    // 3. Process relationships (fork/pipe edges within this action)
+    for edge in &container.taint_graph.edges {
+        if !action_pids.contains(&edge.source_pid) && !action_pids.contains(&edge.target_pid) {
+            continue;
+        }
+        let src = process_name(container, edge.source_pid);
+        let dst = process_name(container, edge.target_pid);
+        let label = match edge.channel_type {
+            crate::state::ChannelType::Fork => "fork",
+            crate::state::ChannelType::Pipe => "pipe",
+            crate::state::ChannelType::FileFlow => continue, // shown as read/write edges instead
+            crate::state::ChannelType::MessageQueue => "mqueue",
+        };
+        edges.push(format!("  {} -> {} ({})", src, dst, label));
+    }
+
+    // 4. Network connections (annotated with container IDs for cross-container flows)
+    for pid in action_pids {
+        let Some(info) = container.process_table.get(pid) else { continue };
+        if info.net_connections.is_empty() { continue; }
+        let name = process_name(container, *pid);
+        let mut connects: Vec<String> = Vec::new();
+        let mut listens: Vec<String> = Vec::new();
         for conn in &info.net_connections {
             if let Some(addr) = conn.strip_prefix("connect ") {
-                if !entry.0.contains(&addr.to_string()) {
-                    entry.0.push(addr.to_string());
+                let annotated = annotate_addr(addr, ip_map);
+                if !connects.contains(&annotated) {
+                    connects.push(annotated);
                 }
-            } else if let Some(addr) = conn.strip_prefix("listen ")
-                && !entry.1.contains(&addr.to_string())
-            {
-                entry.1.push(addr.to_string());
+            } else if let Some(addr) = conn.strip_prefix("listen ") {
+                if !listens.contains(&addr.to_string()) {
+                    listens.push(addr.to_string());
+                }
+            }
+        }
+        if !connects.is_empty() {
+            edges.push(format!("  {} connects {}", name, connects.join(", ")));
+        }
+        if !listens.is_empty() {
+            edges.push(format!("  {} listens {}", name, listens.join(", ")));
+        }
+    }
+
+    // 5. Pre-existing process influence (agent tainting a clean process)
+    for edge in &container.taint_graph.edges {
+        let Some(target) = container.process_table.get(&edge.target_pid) else { continue };
+        let Some(source) = container.process_table.get(&edge.source_pid) else { continue };
+        // Source is agent-tainted, target was pre-existing (taint was 0 before this edge)
+        if source.taint_score >= crate::state::TAINT_THRESHOLD
+            && target.taint_source.contains("from pid")
+            && !action_pids.contains(&edge.target_pid)
+            && action_pids.contains(&edge.source_pid)
+        {
+            let src = process_name(container, edge.source_pid);
+            let dst = process_name(container, edge.target_pid);
+            edges.push(format!("  {} [pre-existing] influenced by {} via {}", dst, src, edge.channel_type));
+        }
+    }
+
+    if edges.is_empty() {
+        return;
+    }
+
+    edges.dedup();
+
+    // Sort by (verb, detail, subject) so identical actions group together.
+    // This puts "curl:X reads /etc/passwd" next to "curl:Y reads /etc/passwd"
+    // rather than interleaved with "curl:X connects ...".
+    edges.sort_by(|a, b| {
+        let ak = edge_sort_key(a);
+        let bk = edge_sort_key(b);
+        ak.cmp(&bk)
+    });
+
+    // Merge lines where PIDs of the same comm do the identical thing.
+    // Exception: if a PID's detail differs from the group, keep it separate
+    // (e.g., one curl reading .ssh/id_rsa should stand out from other curls).
+    let compressed = compress_fork_edges(&edges);
+
+    writeln!(out, "DATA FLOWS:").unwrap();
+    for e in &compressed {
+        writeln!(out, "{}", e).unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+/// Merge edges that differ only in PID into single lines.
+///
+/// Fork edges from the same parent to same comm:
+///   "python3:99 -> curl:100 (fork)" + "python3:99 -> curl:101 (fork)"
+///   → "python3:99 -> curl:100, curl:101 (fork)"
+///
+/// Identical reads across PIDs of the same comm:
+///   "curl:100 reads /etc/passwd" + "curl:101 reads /etc/passwd"
+///   → "curl:100, curl:101 reads /etc/passwd"
+///
+/// All PIDs preserved. No data lost.
+fn compress_fork_edges(edges: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut i = 0;
+
+    while i < edges.len() {
+        let trimmed = edges[i].trim();
+
+        // Try to merge consecutive fork/pipe edges from same parent to same comm
+        if let Some((left, right)) = trimmed.split_once(" -> ") {
+            if let Some((target_name, edge_type)) = right.rsplit_once(' ') {
+                let target_comm = strip_pid(target_name);
+                let mut targets = vec![target_name.to_string()];
+                // Collect consecutive edges with same source and same target comm
+                let mut j = i + 1;
+                while j < edges.len() {
+                    let next = edges[j].trim();
+                    if let Some((nl, nr)) = next.split_once(" -> ") {
+                        if let Some((nt_name, nt_type)) = nr.rsplit_once(' ') {
+                            if nl == left && nt_type == edge_type && strip_pid(nt_name) == target_comm {
+                                targets.push(nt_name.to_string());
+                                j += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+                if targets.len() > 1 {
+                    result.push(format!("  {} -> {} {}", left, targets.join(", "), edge_type));
+                    i = j;
+                    continue;
+                }
+            }
+        }
+
+        // Try to merge consecutive identical-detail edges (same verb+detail, different PIDs)
+        // e.g., "curl:100 reads X" + "curl:101 reads X" → "curl:100, curl:101 reads X"
+        if let Some(verb_pos) = find_verb(trimmed) {
+            let subject = &trimmed[..verb_pos];
+            let verb_and_rest = &trimmed[verb_pos..];
+            let subject_comm = strip_pid(subject.trim());
+
+            let mut subjects = vec![subject.trim().to_string()];
+            let mut j = i + 1;
+            while j < edges.len() {
+                let next = edges[j].trim();
+                if let Some(nv) = find_verb(next) {
+                    let ns = next[..nv].trim();
+                    let nvr = &next[nv..];
+                    if nvr == verb_and_rest && strip_pid(ns) == subject_comm {
+                        subjects.push(ns.to_string());
+                        j += 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+            if subjects.len() > 1 {
+                result.push(format!("  {} {}", subjects.join(", "), verb_and_rest));
+                i = j;
+                continue;
+            }
+        }
+
+        // No merge — keep as-is
+        result.push(edges[i].clone());
+        i += 1;
+    }
+
+    result
+}
+
+/// Sort key: (verb_priority, detail, subject) so edges group by action type.
+fn edge_sort_key(edge: &str) -> (u8, String, String) {
+    let s = edge.trim();
+    if s.contains(" -> ") {
+        return (0, s.to_string(), String::new()); // fork/pipe first
+    }
+    for (priority, verb) in [(1, " reads "), (2, " writes "), (3, " connects "), (4, " listens ")] {
+        if let Some(pos) = s.find(verb) {
+            let subject = &s[..pos];
+            let detail = &s[pos + verb.len()..];
+            return (priority, detail.to_string(), subject.to_string());
+        }
+    }
+    if s.contains("wrote") {
+        return (5, s.to_string(), String::new()); // cross-action flows
+    }
+    if s.contains("pre-existing") {
+        return (6, s.to_string(), String::new());
+    }
+    (9, s.to_string(), String::new())
+}
+
+/// Find the position of the verb ("reads ", "writes ", "connects ", "listens ") in an edge string.
+fn find_verb(s: &str) -> Option<usize> {
+    for verb in &[" reads ", " writes ", " connects ", " listens "] {
+        if let Some(pos) = s.find(verb) {
+            return Some(pos + 1); // +1 to skip the leading space
+        }
+    }
+    None
+}
+
+/// Strip ":PID" suffix from a process name. "curl:12345" → "curl"
+fn strip_pid(name: &str) -> &str {
+    match name.rfind(':') {
+        Some(i) if name[i+1..].chars().all(|c| c.is_ascii_digit()) => &name[..i],
+        _ => name,
+    }
+}
+
+// ── Experiment receipt (multi-container aggregation) ────────────────
+
+/// Generate a unified receipt for an experiment spanning multiple containers.
+/// Shows per-container summaries and cross-container data flows.
+pub fn generate_experiment_receipt(state: &DaemonState, experiment: &Experiment) -> String {
+    let mut out = String::with_capacity(RECEIPT_STRING_CAPACITY * 2);
+
+    writeln!(out, "=== Experiment Receipt: {} ===", experiment.name).unwrap();
+    writeln!(out, "Containers: {}", experiment.container_ids.len()).unwrap();
+    writeln!(out).unwrap();
+
+    // Per-container summaries
+    for cid in &experiment.container_ids {
+        let Some(container) = state.containers.get(cid) else { continue };
+        let total_actions = container.completed_actions.len();
+        let total_processes = container.process_table.processes.len();
+        let total_events: u64 = container.completed_actions.iter()
+            .map(|a| a.total_events())
+            .sum();
+
+        writeln!(out, "── Container {} ──", &cid[..cid.len().min(12)]).unwrap();
+        writeln!(out, "  {} actions, {} processes, {} events",
+            total_actions, total_processes, total_events).unwrap();
+
+        // List actions with their commands
+        for action in &container.completed_actions {
+            if action.action_id == 0 { continue; } // skip lifecycle
+            let events = action.total_events();
+            if events > 0 {
+                writeln!(out, "  Action #{}: {} ({} events)",
+                    action.action_id, action.command, events).unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
+
+    // Cross-container network flows
+    let mut cross_flows: Vec<String> = Vec::new();
+    for cid in &experiment.container_ids {
+        let Some(container) = state.containers.get(cid) else { continue };
+        let short = &cid[..cid.len().min(12)];
+        for info in container.process_table.processes.values() {
+            for conn in &info.net_connections {
+                if let Some(addr) = conn.strip_prefix("connect ") {
+                    // Check if target IP belongs to another container in this experiment
+                    if let Some((ip_str, _port)) = addr.rsplit_once(':') {
+                        if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                            if let Some(target_cid) = state.ip_to_container.get(&ip) {
+                                if target_cid != cid && experiment.container_ids.contains(target_cid) {
+                                    let target_short = &target_cid[..target_cid.len().min(12)];
+                                    let name = format!("{}:{}",
+                                        util::decode_comm(&info.comm), info.pid);
+                                    let flow = format!("  {} [{}] -> {} [{}]",
+                                        name, short, addr, target_short);
+                                    if !cross_flows.contains(&flow) {
+                                        cross_flows.push(flow);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    if by_process.is_empty() {
-        return;
+    if !cross_flows.is_empty() {
+        writeln!(out, "CROSS-CONTAINER FLOWS:").unwrap();
+        for flow in &cross_flows {
+            writeln!(out, "{}", flow).unwrap();
+        }
+        writeln!(out).unwrap();
     }
 
-    writeln!(out, "NETWORK:").unwrap();
-    let mut sorted: Vec<_> = by_process.iter().collect();
-    sorted.sort_by_key(|(name, _)| (*name).clone());
-    for (name, (connects, listens)) in &sorted {
-        if !connects.is_empty() {
-            writeln!(out, "  {} -> {}", name, connects.join(", ")).unwrap();
+    // Per-container data flows (abbreviated)
+    for cid in &experiment.container_ids {
+        let Some(container) = state.containers.get(cid) else { continue };
+        let short = &cid[..cid.len().min(12)];
+
+        // Collect all actions' process events to build the PID set
+        let mut all_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for action in &container.completed_actions {
+            for pe in &action.process_events {
+                all_pids.insert(pe.pid);
+            }
         }
-        if !listens.is_empty() {
-            writeln!(out, "  {} listening on {}", name, listens.join(", ")).unwrap();
+        if let Some(ref action) = container.current_action {
+            for pe in &action.process_events {
+                all_pids.insert(pe.pid);
+            }
+        }
+
+        // Network connections
+        let mut net_edges: Vec<String> = Vec::new();
+        for pid in &all_pids {
+            let Some(info) = container.process_table.get(pid) else { continue };
+            if info.net_connections.is_empty() { continue; }
+            let name = format!("{}:{}", util::decode_comm(&info.comm), pid);
+            for conn in &info.net_connections {
+                if let Some(addr) = conn.strip_prefix("connect ") {
+                    let annotated = annotate_addr(addr, &state.ip_to_container);
+                    net_edges.push(format!("  {} [{}] connects {}", name, short, annotated));
+                }
+            }
+        }
+        if !net_edges.is_empty() {
+            writeln!(out, "NETWORK [{}]:", short).unwrap();
+            for edge in &net_edges {
+                writeln!(out, "{}", edge).unwrap();
+            }
+            writeln!(out).unwrap();
         }
     }
+
+    out
+}
+
+/// Generate a receipt for a specific action across all containers in an experiment.
+/// Merges activity from the same action_id across all experiment containers.
+pub fn generate_experiment_action_receipt(
+    state: &DaemonState,
+    experiment: &Experiment,
+    action_id: u64,
+) -> String {
+    let mut out = String::with_capacity(RECEIPT_STRING_CAPACITY * 2);
+
+    writeln!(out, "=== Experiment Action Receipt: {} — Action #{} ===",
+        experiment.name, action_id).unwrap();
     writeln!(out).unwrap();
+
+    let mut any_data = false;
+
+    for cid in &experiment.container_ids {
+        let Some(container) = state.containers.get(cid) else { continue };
+        let short = &cid[..cid.len().min(12)];
+
+        // Find this action in completed or current
+        let action = container.completed_actions.iter()
+            .find(|a| a.action_id == action_id)
+            .or(container.current_action.as_ref()
+                .filter(|a| a.action_id == action_id));
+
+        let Some(action) = action else { continue };
+        if action.total_events() == 0 && action.process_events.is_empty() {
+            continue;
+        }
+        any_data = true;
+
+        writeln!(out, "── Container {} ──", short).unwrap();
+        writeln!(out, "Command: {}", action.command).unwrap();
+        writeln!(out, "{} syscall events", action.total_events()).unwrap();
+        writeln!(out).unwrap();
+
+        // Process summary
+        let action_pids: std::collections::HashSet<u32> =
+            action.process_events.iter().map(|e| e.pid).collect();
+
+        if !action_pids.is_empty() {
+            writeln!(out, "PROCESSES:").unwrap();
+            for pid in &action_pids {
+                let Some(info) = container.process_table.get(pid) else { continue };
+                writeln!(out, "  [{}:{}] $ {}", info.comm, pid, info.cmdline).unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+
+        // Network connections with cross-container annotation
+        let mut net_lines: Vec<String> = Vec::new();
+        for pid in &action_pids {
+            let Some(info) = container.process_table.get(pid) else { continue };
+            for conn in &info.net_connections {
+                if let Some(addr) = conn.strip_prefix("connect ") {
+                    let annotated = annotate_addr(addr, &state.ip_to_container);
+                    let name = format!("{}:{}", info.comm, pid);
+                    net_lines.push(format!("  {} connects {}", name, annotated));
+                }
+            }
+        }
+        if !net_lines.is_empty() {
+            writeln!(out, "NETWORK:").unwrap();
+            for line in &net_lines {
+                writeln!(out, "{}", line).unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+
+        // Data flows (use the per-container receipt generator for this action)
+        write_graph_diff(&mut out, container, action_id, &action_pids, &state.ip_to_container);
+    }
+
+    if !any_data {
+        writeln!(out, "No activity for action #{} across experiment containers.", action_id).unwrap();
+    }
+
+    out
 }
 
 /// Semantic summary: high-level operations with MITRE ATT&CK mappings.

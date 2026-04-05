@@ -1,0 +1,15 @@
+=== Post-Action Receipt: Action #1 ===
+Command: write /tmp/hello.c
+Duration: 1.2s | 5 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [sh:2622993] $ sh -c cat > /tmp/hello.c << EOF\n#include <stdio.h>\n#include <stdlib.h>\nint main() {\n    FILE *f = fopen("/tmp/output.txt", "w");\n    fprintf(f, "compiled and running\n");\n    fclose(f);\n    system("cat /etc/hostname");\n    return 0;\n}\nEOF
+  [cat:2622999] $ cat
+
+DATA FLOWS:
+  sh:2622993 -> cat:2622999 (fork)
+  sh:2622993 reads /tmp/hello.c
+  sh:2622993 writes /tmp/hello.c
+  cc1:2623031 [pre-existing] influenced by sh:2622993 via file
+
+

@@ -9,7 +9,6 @@
 
 /// A detection rule mapping system behavior to a MITRE ATT&CK technique.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Rule {
     /// Human-readable rule name.
     pub name: &'static str,
@@ -25,21 +24,8 @@ pub struct Rule {
     pub process_exclude: &'static [&'static str],
     /// ATT&CK technique ID (e.g., "T1055.008").
     pub technique_id: &'static str,
-    /// ATT&CK technique name.
-    pub technique_name: &'static str,
-    /// ATT&CK tactic.
-    pub tactic: &'static str,
     /// Severity: 0=info, 1=low, 2=medium, 3=high.
     pub severity: u8,
-    /// Source attribution.
-    pub source: RuleSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleSource {
-    AuditdAttack,
-    Falco,
-    Custom,
 }
 
 /// Evaluate rules against observed process behavior.
@@ -150,10 +136,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["cron", "crond", "anacron"],
         technique_id: "T1053.003",
-        technique_name: "Cron",
-        tactic: "persistence",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Shell config modification",
@@ -166,10 +149,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &[],
         technique_id: "T1546.004",
-        technique_name: "Unix Shell Configuration Modification",
-        tactic: "persistence",
         severity: 2,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Systemd service modification",
@@ -178,10 +158,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["systemd", "systemctl"],
         technique_id: "T1543",
-        technique_name: "Create or Modify System Process",
-        tactic: "persistence",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "SSH authorized_keys modification",
@@ -190,10 +167,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["sshd"],
         technique_id: "T1098.004",
-        technique_name: "SSH Authorized Keys",
-        tactic: "persistence",
         severity: 3,
-        source: RuleSource::Falco,
     },
 
     // ── Privilege Escalation ────────────────────────────────────
@@ -204,10 +178,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["sudo", "su", "login", "sshd", "passwd", "chsh", "newgrp"],
         technique_id: "T1548.001",
-        technique_name: "Setuid and Setgid",
-        tactic: "privilege_escalation",
         severity: 2,
-        source: RuleSource::AuditdAttack,
     },
     Rule {
         name: "Kernel module load",
@@ -216,10 +187,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &[],
         technique_id: "T1547.006",
-        technique_name: "Kernel Modules and Extensions",
-        tactic: "privilege_escalation",
         severity: 3,
-        source: RuleSource::AuditdAttack,
     },
     Rule {
         name: "Container escape attempt",
@@ -228,10 +196,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["nsenter", "unshare"],
         process_exclude: &[],
         technique_id: "T1611",
-        technique_name: "Escape to Host",
-        tactic: "privilege_escalation",
         severity: 3,
-        source: RuleSource::Falco,
     },
 
     // ── Defense Evasion ─────────────────────────────────────────
@@ -242,10 +207,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["chronyd", "ntpd", "systemd-timesyncd"],
         technique_id: "T1070.006",
-        technique_name: "Timestomp",
-        tactic: "defense_evasion",
         severity: 2,
-        source: RuleSource::AuditdAttack,
     },
     Rule {
         name: "File deletion (evidence removal)",
@@ -254,10 +216,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["logrotate"],
         technique_id: "T1070",
-        technique_name: "Indicator Removal",
-        tactic: "defense_evasion",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Hidden file/directory creation",
@@ -266,10 +225,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &[],
         technique_id: "T1564.001",
-        technique_name: "Hidden Files and Directories",
-        tactic: "defense_evasion",
         severity: 2,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Chmod sensitive file",
@@ -278,10 +234,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["dpkg", "rpm", "apk", "apt"],
         technique_id: "T1222.002",
-        technique_name: "Linux and Mac File and Directory Permissions Modification",
-        tactic: "defense_evasion",
         severity: 2,
-        source: RuleSource::AuditdAttack,
     },
 
     // ── Credential Access ───────────────────────────────────────
@@ -297,10 +250,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["sshd", "login", "passwd", "shadow", "chage"],
         technique_id: "T1552.001",
-        technique_name: "Credentials In Files",
-        tactic: "credential_access",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Password store access",
@@ -312,10 +262,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &[],
         technique_id: "T1555",
-        technique_name: "Credentials from Password Stores",
-        tactic: "credential_access",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Passwd/shadow modification",
@@ -324,10 +271,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["passwd", "useradd", "usermod", "groupadd", "groupmod", "adduser", "addgroup"],
         technique_id: "T1098",
-        technique_name: "Account Manipulation",
-        tactic: "persistence",
         severity: 3,
-        source: RuleSource::AuditdAttack,
     },
 
     // ── Discovery ───────────────────────────────────────────────
@@ -343,10 +287,7 @@ pub static RULES: &[Rule] = &[
         ],
         process_exclude: &[],
         technique_id: "T1046",
-        technique_name: "Network Service Discovery",
-        tactic: "discovery",
         severity: 1,
-        source: RuleSource::Falco,
     },
     // ── Collection ──────────────────────────────────────────────
     Rule {
@@ -356,10 +297,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["tar", "gzip", "zip", "bzip2", "xz", "7z", "rar"],
         process_exclude: &[],
         technique_id: "T1560",
-        technique_name: "Archive Collected Data",
-        tactic: "collection",
         severity: 1,
-        source: RuleSource::Custom,
     },
 
     // ── Command and Control ─────────────────────────────────────
@@ -370,10 +308,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["apt", "apt-get", "apk", "yum", "dnf", "pip", "npm", "git"],
         technique_id: "T1071",
-        technique_name: "Application Layer Protocol",
-        tactic: "command_and_control",
         severity: 1,
-        source: RuleSource::AuditdAttack,
     },
     Rule {
         name: "Curl/wget download",
@@ -382,10 +317,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["curl", "wget"],
         process_exclude: &[],
         technique_id: "T1105",
-        technique_name: "Ingress Tool Transfer",
-        tactic: "command_and_control",
         severity: 2,
-        source: RuleSource::AuditdAttack,
     },
     Rule {
         name: "Netcat/socat (reverse shell tool)",
@@ -394,10 +326,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["nc", "ncat", "netcat", "socat"],
         process_exclude: &[],
         technique_id: "T1059.004",
-        technique_name: "Unix Shell (reverse shell tool)",
-        tactic: "command_and_control",
         severity: 3,
-        source: RuleSource::Falco,
     },
 
     // ── Exfiltration ────────────────────────────────────────────
@@ -408,10 +337,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["scp", "sftp", "rsync"],
         process_exclude: &[],
         technique_id: "T1048",
-        technique_name: "Exfiltration Over Alternative Protocol",
-        tactic: "exfiltration",
         severity: 2,
-        source: RuleSource::Custom,
     },
 
     // ── Impact ──────────────────────────────────────────────────
@@ -422,10 +348,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["xmrig", "minerd", "minergate", "cpuminer", "ethminer"],
         process_exclude: &[],
         technique_id: "T1496",
-        technique_name: "Resource Hijacking",
-        tactic: "impact",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Data destruction (bulk delete)",
@@ -434,10 +357,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["rm", "shred", "wipe"],
         process_exclude: &[],
         technique_id: "T1485",
-        technique_name: "Data Destruction",
-        tactic: "impact",
         severity: 2,
-        source: RuleSource::Falco,
     },
 
     // ── Process Injection ───────────────────────────────────────
@@ -448,10 +368,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["gdb", "strace", "ltrace", "lldb"],
         technique_id: "T1055.008",
-        technique_name: "Ptrace System Calls",
-        tactic: "defense_evasion",
         severity: 3,
-        source: RuleSource::Falco,
     },
     Rule {
         name: "Debug tool execution",
@@ -460,10 +377,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["gdb", "strace", "ltrace", "lldb"],
         process_exclude: &[],
         technique_id: "T1055",
-        technique_name: "Process Injection (debug tools)",
-        tactic: "defense_evasion",
         severity: 2,
-        source: RuleSource::Custom,
     },
 
     // ── Compile After Delivery ──────────────────────────────────
@@ -474,10 +388,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["gcc", "g++", "cc", "c++", "clang", "clang++", "rustc", "javac", "go"],
         process_exclude: &[],
         technique_id: "T1027.004",
-        technique_name: "Compile After Delivery",
-        tactic: "defense_evasion",
         severity: 1,
-        source: RuleSource::Custom,
     },
 
     // ── Fileless Execution ──────────────────────────────────────
@@ -488,10 +399,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &[],
         technique_id: "T1620",
-        technique_name: "Reflective Code Loading",
-        tactic: "defense_evasion",
         severity: 3,
-        source: RuleSource::Falco,
     },
 
     // ── Hidden Data Flows ────────────────────────────────────────
@@ -502,10 +410,7 @@ pub static RULES: &[Rule] = &[
         process_patterns: &[],
         process_exclude: &["nginx", "apache2", "httpd", "haproxy"], // web servers use these legitimately
         technique_id: "T1048",
-        technique_name: "Exfiltration Over Alternative Protocol",
-        tactic: "exfiltration",
         severity: 2,
-        source: RuleSource::Custom,
     },
 
     // ── Lateral Movement ────────────────────────────────────────
@@ -516,9 +421,6 @@ pub static RULES: &[Rule] = &[
         process_patterns: &["ssh", "sshpass"],
         process_exclude: &[],
         technique_id: "T1021.004",
-        technique_name: "SSH",
-        tactic: "lateral_movement",
         severity: 2,
-        source: RuleSource::AuditdAttack,
     },
 ];

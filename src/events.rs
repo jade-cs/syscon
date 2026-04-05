@@ -1,5 +1,12 @@
 use serde::Serialize;
 
+/// Wall-clock time in milliseconds since epoch (matches audit record timestamps).
+pub fn wall_clock_ms() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts); }
+    (ts.tv_sec as u64) * 1000 + (ts.tv_nsec as u64) / 1_000_000
+}
+
 /// A filesystem operation observed via audit.
 #[derive(Debug, Clone, Serialize)]
 pub struct FileEvent {
@@ -14,11 +21,9 @@ pub struct FileEvent {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum FileOp {
     Open,
     OpenWrite,
-    Create,
     Read,
     Write,
     Unlink,
@@ -33,7 +38,6 @@ impl std::fmt::Display for FileOp {
         match self {
             FileOp::Open => write!(f, "open_read"),
             FileOp::OpenWrite => write!(f, "open_write"),
-            FileOp::Create => write!(f, "create"),
             FileOp::Read => write!(f, "read"),
             FileOp::Write => write!(f, "write"),
             FileOp::Unlink => write!(f, "unlink"),
@@ -51,12 +55,7 @@ pub struct NetworkEvent {
     pub pid: u32,
     pub timestamp: u64,
     pub operation: NetOp,
-    /// Address family string, e.g. "AF_INET", "AF_UNIX"
-    pub family: String,
-    pub local_addr: Option<String>,
     pub remote_addr: Option<String>,
-    pub port: Option<u16>,
-    pub is_first_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
@@ -121,6 +120,10 @@ pub struct ActionLog {
     pub command: String,
     pub start_time: u64,
     pub end_time: Option<u64>,
+    /// Wall-clock start time (ms since epoch) for audit timestamp comparison.
+    pub wall_start_ms: u64,
+    /// Wall-clock end time (ms since epoch).
+    pub wall_end_ms: Option<u64>,
     /// Deduplicated: (pid, op) -> count
     pub file_op_counts: std::collections::HashMap<(u32, FileOp), u64>,
     /// Unique file events (first occurrence only, for anomaly checking)
@@ -129,29 +132,35 @@ pub struct ActionLog {
     pub net_op_counts: std::collections::HashMap<(u32, NetOp), u64>,
     /// Process lifecycle events (each is unique)
     pub process_events: Vec<ProcessEvent>,
-    /// Total raw event count
-    pub total_events: u64,
 }
 
 impl ActionLog {
     pub fn new(action_id: u64, command: String, start_time: u64) -> Self {
+        let wall_ms = wall_clock_ms();
         Self {
             action_id,
             command,
             start_time,
             end_time: None,
+            wall_start_ms: wall_ms,
+            wall_end_ms: None,
             file_op_counts: std::collections::HashMap::new(),
             file_events: Vec::new(),
             net_op_counts: std::collections::HashMap::new(),
             process_events: Vec::new(),
-            total_events: 0,
         }
     }
 
     /// Record a file event. Only stores the full event on first occurrence
     /// of a (pid, op) pair; subsequent ones just increment the counter.
+    /// Total raw event count (computed from sub-counts).
+    pub fn total_events(&self) -> u64 {
+        let file: u64 = self.file_op_counts.values().sum();
+        let net: u64 = self.net_op_counts.values().sum();
+        file + net + self.process_events.len() as u64
+    }
+
     pub fn record_file_event(&mut self, event: FileEvent) {
-        self.total_events += 1;
         let key = (event.pid, event.operation);
         let count = self.file_op_counts.entry(key).or_insert(0);
         *count += 1;
@@ -163,14 +172,12 @@ impl ActionLog {
 
     /// Record a network event (deduplicated by pid + op).
     pub fn record_net_event(&mut self, event: NetworkEvent) {
-        self.total_events += 1;
         let key = (event.pid, event.operation);
         *self.net_op_counts.entry(key).or_insert(0) += 1;
     }
 
     /// Record a process event (always stored, each is unique).
     pub fn record_process_event(&mut self, event: ProcessEvent) {
-        self.total_events += 1;
         self.process_events.push(event);
     }
 }

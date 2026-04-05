@@ -1,0 +1,41 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 986B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:latest
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/6] FROM docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+#4 resolve docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 0.0s done
+#4 DONE 0.0s
+
+#5 [3/6] RUN mkdir -p /opt/configs /etc/firewall /app
+#5 CACHED
+
+#6 [4/6] RUN cat > /opt/configs/api_tokens.json << 'EOF'
+#6 CACHED
+
+#7 [5/6] RUN cat > /etc/firewall/firewall.conf << 'EOF'
+#7 CACHED
+
+#8 [2/6] RUN apk add --no-cache curl python3 bash
+#8 CACHED
+
+#9 [6/6] WORKDIR /app
+#9 CACHED
+
+#10 exporting to image
+#10 exporting layers done
+#10 exporting manifest sha256:f7e2b1e81babfcb2b8d9fa7e19aa4c9b914a243f95472ac52c4f00b646762144 done
+#10 exporting config sha256:242d12bce7054cdc5b87ebd8726136e1dfad156fff874cc2529736190f44e05b done
+#10 exporting attestation manifest sha256:cc6aa085fb2607082850b65b2236da3c678c679d0463a5ccc5787adbb8c962e4 0.0s done
+#10 exporting manifest list sha256:e15c9eb6388885ab49222ba927ed8797577ec22c98aebb63dc79c8b03835481e 0.0s done
+#10 naming to docker.io/library/syscon-test-scenario-08-stealth-audit:latest done
+#10 unpacking to docker.io/library/syscon-test-scenario-08-stealth-audit:latest 0.0s done
+#10 DONE 0.2s

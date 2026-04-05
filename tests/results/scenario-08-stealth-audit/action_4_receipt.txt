@@ -1,0 +1,18 @@
+=== Post-Action Receipt: Action #4 ===
+Command: bash: cat /app/audit_report.json
+Duration: 2.3s | 102 syscall events
+
+PROCESSES: 4 unique, 0 forked, 0 exited
+  [sh:2624864] $ sh -c cat /app/audit_report.json | python3 -m json.tool | head -20
+  [cat:2624870] $ cat /app/audit_report.json
+  [python3:2624871] $ python3 -m json.tool
+  [head:2624872] $ head -20
+
+DATA FLOWS:
+  python3:2624810 (action #3) wrote /app/audit_report.json -> cat:2624870 reads
+  sh:2624864 -> cat:2624870 (fork)
+  sh:2624864 -> head:2624872 (fork)
+  sh:2624864 -> python3:2624871 (fork)
+  python3:2624871 reads /app
+
+
